@@ -1,13 +1,15 @@
-# Browser Automation with Playwright
+# V0.dev Response Capture Tool
 
-A simple browser automation script that opens v0.dev in a new tab, using your existing Chrome browser and preserving all your accounts and cookies.
+A tool that connects to your browser, navigates to v0.dev, submits prompts, and captures all network responses - including the streamed AI responses. This allows you to save the complete output from v0.dev for further analysis or use.
 
 ## Features
 
 - Connects to your existing Chrome browser with all your accounts/cookies
-- Creates a new tab to navigate to v0.dev
-- Falls back to launching Chrome with your profile if not already running
-- Keeps your Chrome instance open after the script finishes
+- Navigates to v0.dev and submits your prompt
+- Captures all network activity, focusing on streamed AI responses
+- Decodes the Vercel AI SDK streaming format to extract complete responses
+- Saves responses to files for later reference
+- Provides tools to extract and view responses from saved files
 
 ## Prerequisites
 
@@ -16,51 +18,89 @@ A simple browser automation script that opens v0.dev in a new tab, using your ex
 
 ## Installation
 
-Install Playwright:
+1. Clone this repository
+2. Install dependencies:
 
 ```bash
 # Using pip
-pip install playwright
+pip install -r requirements.txt
 
 # OR using uv
-uv pip install playwright
+uv pip install -r requirements.txt
+
+# Install Playwright browsers
+python -m playwright install chromium
 ```
 
 ## Usage
 
-### Option 1: Connect to your existing Chrome browser (recommended)
+### Capturing a v0.dev response
 
-1. First, start Chrome with remote debugging enabled:
-
-```bash
-# macOS
-/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222
-```
-
-2. Then run the script:
+Run the script with a prompt to capture the response:
 
 ```bash
+# Use the default prompt (calendar app)
 python main.py
+
+# Specify a custom prompt
+python main.py monitor --prompt "Build a landing page for a coffee shop with a menu section and contact form"
 ```
 
-### Option 2: Let the script handle everything
+The script will:
+1. Connect to your Chrome browser (or launch a new instance)
+2. Navigate to v0.dev
+3. Submit your prompt
+4. Capture all network activity, including the streaming responses
+5. Save the responses to the `captures` directory
 
-Simply run the script, and it will:
-1. Check if Chrome is running with debugging enabled
-2. If not, launch Chrome with your profile and the debugging port
-3. Connect to Chrome and open a new tab to v0.dev
-4. Keep your Chrome instance running when you exit
+### Listing captured files
+
+List all the files in your captures directory:
 
 ```bash
-python main.py
+python main.py list
 ```
 
-## How it works
+### Extracting responses from captured files
 
-1. The script first tries to connect to an existing Chrome browser with remote debugging
-2. If none is found, it launches Chrome with your user profile
-3. It opens a new tab in your Chrome and navigates to v0.dev
-4. When you press Enter, it closes the automation but keeps your Chrome running
+Extract and display the complete response from a captured file:
+
+```bash
+python main.py extract captures/full_response_1234567890.txt
+```
+
+This will:
+1. Parse and decode the captured file
+2. Extract the complete text response
+3. Display it in the terminal
+4. Save a clean version to a new file
+
+## How It Works
+
+### Vercel AI SDK Streaming Format
+
+v0.dev uses the Vercel AI SDK to stream responses in a Server-Sent Events (SSE) format:
+
+```
+data: {"type":"data","value":[{"text":"Building"}]}
+data: {"type":"data","value":[{"text":" a"}]}
+data: {"type":"data","value":[{"text":" calendar"}]}
+data: {"type":"message_annotations","value":[{"type":"finish_reason","message":"stop"}]}
+```
+
+Our tool:
+1. Captures these streamed responses
+2. Decodes the format to extract the text content
+3. Assembles the complete response
+4. Saves both raw and processed data
+
+### File Types
+
+The tool saves several types of files:
+- `sse_stream_*.jsonl`: Raw SSE stream data
+- `sse_decoded_*.jsonl`: Decoded JSON events from the stream
+- `assembled_content_*.txt`: Assembled text content from the stream
+- `full_response_*.txt`: Complete, cleaned response text
 
 ## Troubleshooting
 
@@ -71,4 +111,18 @@ If you have issues:
    ```bash 
    python -m playwright install chromium
    ```
-3. If you want more detailed logs, set `debug=True` in the BrowserConfig
+3. If responses aren't being captured properly, increase the monitoring time in `tools.py`
+
+## Advanced Usage
+
+### Directly using the extraction tool
+
+You can also use the extraction function directly from the `tools.py` file:
+
+```bash
+python tools.py extract captures/your_captured_file.jsonl
+```
+
+### Custom monitoring duration
+
+By default, the script monitors for 60 seconds. For complex prompts that take longer, you can modify the `monitor_v0_interactions` function in `tools.py` to increase the monitoring time.

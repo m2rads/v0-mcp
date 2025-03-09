@@ -5,8 +5,35 @@ import base64
 import os
 import time
 import traceback
-from typing import Dict, List, Optional, Callable, Any
+from typing import Dict, List, Optional, Callable, Any, Union
 from browser import Browser, BrowserConfig
+
+# Add utility functions at the top level to help parse Vercel AI SDK streams
+def extract_event_data(line: str) -> Optional[str]:
+    """Extract data from an SSE event line."""
+    if line.startswith('data: '):
+        return line[6:].strip()
+    return None
+
+def parse_sse_chunk(chunk: str) -> List[Dict[str, Any]]:
+    """Parse a chunk of SSE text into structured events."""
+    events = []
+    for line in chunk.split('\n'):
+        line = line.strip()
+        if not line or line.startswith(':'):  # Skip comments and empty lines
+            continue
+        
+        data = extract_event_data(line)
+        if data:
+            try:
+                # Try to parse as JSON
+                json_data = json.loads(data)
+                events.append(json_data)
+            except json.JSONDecodeError:
+                # If not valid JSON, store as raw text
+                events.append({"raw": data})
+    
+    return events
 
 class NetworkMonitor:
     """Monitor and capture network traffic for v0.dev interactions"""
@@ -28,6 +55,12 @@ class NetworkMonitor:
         # Keep track of request IDs for matching requests and responses
         self.request_map = {}
         self.saved_files = []  # Track successfully saved files
+        
+        # To assemble complete SSE messages across chunks
+        self.partial_sse_data = ""
+        
+        # Store assembled content from streaming responses
+        self.assembled_content = ""
         
     def log(self, message):
         """Log debug messages"""
@@ -257,43 +290,90 @@ class NetworkMonitor:
                         chunks = []
                         timestamp = int(time.time())
                         filename = f"{self.capture_dir}/sse_stream_{timestamp}.jsonl"
+                        decoded_filename = f"{self.capture_dir}/sse_decoded_{timestamp}.jsonl"
+                        
+                        # Keep track of partial SSE data across chunks
+                        partial_data = ""
                         
                         # Write each chunk to the file as we receive it
-                        with open(filename, "wb") as f:
+                        with open(filename, "wb") as raw_file, open(decoded_filename, "w") as decoded_file:
                             try:
+                                print(f"📝 Streaming SSE data to {filename} and decoding to {decoded_filename}")
+                                
                                 while True:
                                     chunk = await reader.read(1024)
                                     if not chunk:
                                         break
+                                    
+                                    # Save the raw chunk
                                     chunks.append(chunk)
-                                    f.write(chunk)
+                                    raw_file.write(chunk)
+                                    
+                                    # Try to decode and parse this chunk
+                                    try:
+                                        chunk_text = chunk.decode('utf-8', errors='ignore')
+                                        
+                                        # Combine with any partial data from previous chunk
+                                        combined_text = partial_data + chunk_text
+                                        
+                                        # If we have incomplete lines, save them for the next chunk
+                                        lines = combined_text.split('\n')
+                                        if not combined_text.endswith('\n'):
+                                            partial_data = lines.pop()
+                                        else:
+                                            partial_data = ""
+                                            
+                                        # Parse the complete lines in this chunk
+                                        events = parse_sse_chunk('\n'.join(lines))
+                                        
+                                        # Write decoded events to file
+                                        for event in events:
+                                            decoded_file.write(json.dumps(event) + "\n")
+                                            decoded_file.flush()  # Ensure data is written immediately
+                                            
+                                            # Store Vercel AI responses for later
+                                            self.vercel_ai_responses.append(event)
+                                    
+                                    except Exception as e:
+                                        if self.debug:
+                                            print(f"Error decoding chunk: {e}")
+                            
                             except Exception as e:
                                 print(f"Error during stream reading: {e}")
+                                if self.debug:
+                                    traceback.print_exc()
                         
                         self.saved_files.append(filename)
-                        print(f"📝 Saved SSE stream to {filename}")
+                        self.saved_files.append(decoded_filename)
+                        print(f"📝 Completed saving SSE stream to {filename} and decoded events to {decoded_filename}")
                         
-                        # Try to parse the SSE stream into events
+                        # Process the full stream content
                         full_data = b"".join(chunks)
                         events = self._parse_sse_stream(full_data)
                         
-                        if events:
-                            decoded_filename = f"{self.capture_dir}/sse_decoded_{timestamp}.jsonl"
-                            with open(decoded_filename, "w") as f:
-                                for event in events:
-                                    f.write(json.dumps(event) + "\n")
-                            self.saved_files.append(decoded_filename)
-                            print(f"📝 Saved decoded SSE events to {decoded_filename}")
-                            
-                            # Store these in our vercel_ai_responses
-                            self.vercel_ai_responses.extend(events)
+                        # Save the fully assembled text content
+                        if self.assembled_content:
+                            with open(f"{self.capture_dir}/full_response_{timestamp}.txt", "w") as f:
+                                f.write(self.assembled_content)
+                            self.saved_files.append(f"{self.capture_dir}/full_response_{timestamp}.txt")
+                            print(f"📝 Saved fully assembled response to full_response_{timestamp}.txt")
+                    
                     except Exception as e:
                         print(f"Error handling SSE stream: {e}")
+                        if self.debug:
+                            traceback.print_exc()
             except Exception as e:
                 print(f"Error checking headers for SSE: {e}")
     
-    def _parse_sse_stream(self, data):
-        """Parse SSE stream data into events"""
+    def _parse_sse_stream(self, data: Union[bytes, str]) -> List[Dict[str, Any]]:
+        """
+        Parse SSE stream data into structured events, with special handling for Vercel AI SDK format.
+        
+        The Vercel AI SDK uses a format like:
+        data: {"type":"data","value":[{"text":"some content"}]}
+        data: {"type":"data","value":[{"text":" more content"}]}
+        data: {"type":"message_annotations","value":[{"type":"finish_reason","message":"stop"}]}
+        """
         if not data:
             return []
             
@@ -303,32 +383,93 @@ class NetworkMonitor:
                 text = data.decode('utf-8', errors='ignore')
             else:
                 text = data
-                
-            # Split into events (separated by double newlines)
+            
+            # Store raw data for debug
+            if self.debug:
+                timestamp = int(time.time())
+                with open(f"{self.capture_dir}/raw_sse_{timestamp}.txt", "w") as f:
+                    f.write(text)
+                print(f"📝 Saved raw SSE data for debugging to raw_sse_{timestamp}.txt")
+            
+            # Initialize event collection
             events = []
+            assembled_text = ""
             
-            # Handle different event formats
-            # Match "data: {json}" format
-            data_matches = re.finditer(r'data: ({.*})', text)
-            for match in data_matches:
-                try:
-                    json_str = match.group(1)
-                    json_data = json.loads(json_str)
-                    events.append(json_data)
-                except:
-                    pass
+            # Process different Vercel AI SDK event formats
             
-            # Match Vercel AI SDK format with "text: " prefix
-            text_matches = re.finditer(r'data: (\{.*?"text":\s*".*?"\s*.*?})', text)
-            for match in text_matches:
-                try:
-                    json_str = match.group(1)
-                    json_data = json.loads(json_str)
-                    events.append(json_data)
-                except:
-                    pass
+            # First, try to extract standard SSE lines (data: {json})
+            lines = text.split('\n')
+            for i, line in enumerate(lines):
+                line = line.strip()
+                if not line or line.startswith(':'):  # Skip comments and empty lines
+                    continue
+                
+                # Extract data from "data: " prefixed lines
+                if line.startswith('data: '):
+                    data_content = line[6:]
+                    try:
+                        # Try to parse as JSON
+                        parsed = json.loads(data_content)
+                        
+                        # Handle Vercel AI SDK format with type and value fields
+                        if isinstance(parsed, dict) and 'type' in parsed and 'value' in parsed:
+                            if parsed['type'] == 'data' and isinstance(parsed['value'], list):
+                                # Extract text from the value array
+                                for item in parsed['value']:
+                                    if isinstance(item, dict) and 'text' in item:
+                                        text_content = item['text']
+                                        assembled_text += text_content
+                                        events.append({
+                                            "event_type": "data",
+                                            "text": text_content,
+                                            "assembled_text": assembled_text
+                                        })
+                            
+                            elif parsed['type'] == 'message_annotations':
+                                # Handle annotations like finish_reason
+                                events.append({
+                                    "event_type": "message_annotations",
+                                    "annotations": parsed['value']
+                                })
+                        else:
+                            # Handle other JSON formats
+                            events.append(parsed)
+                    except json.JSONDecodeError:
+                        # If not valid JSON, store as raw text
+                        events.append({"raw": data_content})
             
-            # If we couldn't parse any JSON, just split by data: lines
+            # If we couldn't parse any structured events, fall back to regex patterns
+            if not events:
+                # Try to extract JSON with text field
+                text_matches = re.finditer(r'data: (\{.*?"text":\s*".*?"\s*.*?\})', text)
+                for match in text_matches:
+                    try:
+                        json_str = match.group(1)
+                        json_data = json.loads(json_str)
+                        events.append(json_data)
+                    except:
+                        pass
+                
+                # If still no events, try basic JSON pattern
+                if not events:
+                    json_matches = re.finditer(r'data: ({.*?})', text)
+                    for match in json_matches:
+                        try:
+                            json_str = match.group(1)
+                            json_data = json.loads(json_str)
+                            events.append(json_data)
+                        except:
+                            pass
+            
+            # If we have extracted content, save the assembled text
+            if assembled_text:
+                self.assembled_content += assembled_text
+                timestamp = int(time.time())
+                with open(f"{self.capture_dir}/assembled_content_{timestamp}.txt", "w") as f:
+                    f.write(self.assembled_content)
+                print(f"📝 Saved assembled text content to assembled_content_{timestamp}.txt")
+            
+            # If we still have no events, just return raw chunks
             if not events:
                 for line in text.split('\n'):
                     if line.startswith('data: '):
@@ -761,11 +902,12 @@ async def monitor_v0_interactions(prompt="Build a calendar app with month and da
         
         print("\n🔍 Capturing network activity and saving payloads...")
         print("Check the 'captures' directory for saved request/response data")
-        print("Monitoring for 30 seconds to capture responses...")
+        print("Monitoring for 60 seconds to capture all responses (v0.dev can take time to generate)...")
         
-        # Wait for some time to capture network activity (extended to 30s for more time to capture responses)
-        for i in range(30):
-            print(f"Capturing... {i+1}/30 seconds", end="\r")
+        # Wait for some time to capture network activity (extended for more time to capture responses)
+        # v0.dev responses can take a while, especially for complex prompts
+        for i in range(60):
+            print(f"Capturing... {i+1}/60 seconds", end="\r")
             await asyncio.sleep(1)
         
         print("\nCapture period complete. Processing pending tasks...")
@@ -783,10 +925,20 @@ async def monitor_v0_interactions(prompt="Build a calendar app with month and da
         try:
             files = os.listdir(capture_dir)
             if files:
-                for i, file in enumerate(files, 1):
+                for i, file in enumerate(sorted(files), 1):
                     file_path = os.path.join(capture_dir, file)
                     size = os.path.getsize(file_path)
                     print(f"  {i}. {file} ({size} bytes)")
+                    
+                    # For text files containing "full_response" or "assembled_content", show a preview
+                    if file.endswith(".txt") and ("full_response" in file or "assembled_content" in file):
+                        try:
+                            with open(file_path, "r") as f:
+                                content = f.read(500)  # Read first 500 chars
+                                if content:
+                                    print(f"    Preview: {content[:100]}...")
+                        except:
+                            pass
             else:
                 print("  (directory is empty)")
         except Exception as e:
@@ -808,3 +960,111 @@ async def monitor_v0_interactions(prompt="Build a calendar app with month and da
             
         # Clean up resources (this will keep the user's Chrome open)
         await browser.close() 
+
+def extract_v0_response(captured_file_path):
+    """
+    Extract and process a complete response from a v0.dev captured file.
+    This function takes a capture file path and returns the cleaned content.
+    
+    Args:
+        captured_file_path: Path to the captured file (typically assembled_content or full_response)
+    
+    Returns:
+        str: The cleaned, complete response text
+    """
+    try:
+        if not os.path.exists(captured_file_path):
+            print(f"Error: File {captured_file_path} does not exist")
+            return None
+        
+        # Read the file content
+        with open(captured_file_path, 'r') as f:
+            content = f.read()
+        
+        # If this is already a clean text file, return it
+        if captured_file_path.endswith('full_response.txt') or captured_file_path.endswith('assembled_content.txt'):
+            print(f"Extracted {len(content)} characters of text from {os.path.basename(captured_file_path)}")
+            return content
+        
+        # If this is a JSONL file, parse each line and extract text content
+        if captured_file_path.endswith('.jsonl'):
+            assembled_text = ""
+            with open(captured_file_path, 'r') as f:
+                for line in f:
+                    try:
+                        data = json.loads(line.strip())
+                        # Extract text from various formats
+                        if 'text' in data:
+                            assembled_text += data['text']
+                        elif 'event_type' in data and data['event_type'] == 'data' and 'text' in data:
+                            assembled_text += data['text']
+                        elif 'value' in data and isinstance(data['value'], list):
+                            for item in data['value']:
+                                if isinstance(item, dict) and 'text' in item:
+                                    assembled_text += item['text']
+                    except:
+                        continue
+            
+            if assembled_text:
+                print(f"Extracted {len(assembled_text)} characters of text from {os.path.basename(captured_file_path)}")
+                return assembled_text
+        
+        # If this is a raw SSE stream, try to parse it
+        lines = content.split('\n')
+        assembled_text = ""
+        
+        for line in lines:
+            if line.startswith('data: '):
+                try:
+                    data_content = line[6:]
+                    json_data = json.loads(data_content)
+                    
+                    # Handle Vercel AI SDK format
+                    if isinstance(json_data, dict):
+                        if 'type' in json_data and json_data['type'] == 'data' and 'value' in json_data:
+                            for item in json_data['value']:
+                                if isinstance(item, dict) and 'text' in item:
+                                    assembled_text += item['text']
+                        elif 'text' in json_data:
+                            assembled_text += json_data['text']
+                except:
+                    pass
+        
+        if assembled_text:
+            print(f"Extracted {len(assembled_text)} characters of text from {os.path.basename(captured_file_path)}")
+            return assembled_text
+        
+        # If we couldn't extract any text, return the original content
+        print(f"Could not extract structured text. Returning raw content ({len(content)} characters)")
+        return content
+        
+    except Exception as e:
+        print(f"Error extracting v0 response: {e}")
+        traceback.print_exc()
+        return None
+
+if __name__ == "__main__":
+    """
+    Script entry point. You can also provide a file path to extract and print a response.
+    
+    Usage:
+        python tools.py                      # Run the main monitoring function
+        python tools.py extract <filepath>   # Extract and print response from a captured file
+    """
+    if len(sys.argv) > 1 and sys.argv[1] == "extract":
+        if len(sys.argv) > 2:
+            filepath = sys.argv[2]
+            print(f"Extracting response from {filepath}...")
+            response = extract_v0_response(filepath)
+            if response:
+                print("\n" + "=" * 80)
+                print("EXTRACTED RESPONSE:")
+                print("=" * 80)
+                print(response)
+                print("=" * 80)
+        else:
+            print("Please provide a file path to extract from")
+            print("Usage: python tools.py extract <filepath>")
+    else:
+        # Run the main function
+        asyncio.run(monitor_v0_interactions()) 
