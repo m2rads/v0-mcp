@@ -2,34 +2,28 @@ import asyncio
 import platform
 import sys
 from browser import Browser, BrowserConfig
+from tools import monitor_v0_interactions
 
 async def main_automation():
-    """Main automation function that navigates to v0.dev"""
-    # Configure browser options
-    config = BrowserConfig(
-        headless=False,
-        extra_args=["--disable-gpu"] if platform.system() == "Darwin" else [],
-        debug=False  # Set to True for more detailed logs
-    )
+    """Main automation function that monitors v0.dev interactions"""
+    # Calendar app prompt with specific details to trigger a more complex response
+    prompt = """
+    Build a calendar app with:
+    - Month view with ability to navigate between months
+    - Day view showing hourly slots
+    - Ability to add events with title, start time, end time
+    - Color coding for different event types
+    - Responsive design for mobile and desktop
+    """
     
-    # Initialize browser manager
-    browser_manager = Browser(config)
-    try:
-        # Setup and connect to browser
-        await browser_manager.setup()
-        
-        # Navigate to v0.dev and get the page object
-        page = await browser_manager.navigate("https://v0.dev")
-        
-        # Wait for user input before closing
-        print("\nPress Enter to close the automation (your Chrome will remain open)...")
-        input()
-        
-    except Exception as e:
-        print(f"An error occurred: {e}")
-    finally:
-        # Clean up resources (this will keep the user's Chrome open)
-        await browser_manager.close()
+    print("-" * 80)
+    print("Starting v0.dev network monitoring...")
+    print("Will intercept all network traffic, including binary streaming responses")
+    print("Calendar app prompt will be submitted automatically")
+    print("-" * 80)
+    
+    # Use our monitor_v0_interactions function from tools.py with the detailed prompt
+    await monitor_v0_interactions(prompt)
 
 def main():
     """Entry point for the script"""
@@ -39,6 +33,8 @@ def main():
         print("\nScript terminated by user.")
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
+        import traceback
+        traceback.print_exc()  # Print full stack trace for better debugging
 
 if __name__ == "__main__":
     main()
