@@ -39,6 +39,7 @@ class NetworkMonitor:
     """Monitor and capture network traffic for v0.dev interactions"""
     
     def __init__(self, browser: Browser, debug: bool = False):
+        """Monitor and capture network traffic for v0.dev interactions"""
         self.browser = browser
         self.debug = debug
         self.page = None
@@ -50,7 +51,6 @@ class NetworkMonitor:
         # Create captures directory if it doesn't exist
         self.capture_dir = "captures"
         os.makedirs(self.capture_dir, exist_ok=True)
-        print(f"📁 Created captures directory at: {os.path.abspath(self.capture_dir)}")
         
         # Keep track of request IDs for matching requests and responses
         self.request_map = {}
@@ -86,7 +86,7 @@ class NetworkMonitor:
         
         # Navigate to v0.dev
         await self.page.goto(url, wait_until="domcontentloaded")
-        print("✅ Page loaded - ready to submit prompt")
+        print("Page loaded - ready for prompt")
         
         # Enable request and response handling - must be done after page load
         await self._setup_network_interception()
@@ -199,7 +199,8 @@ class NetworkMonitor:
             # Set up listener for console messages which may contain our captured data
             self.page.on("console", self._handle_console_message)
             
-            print("✅ Page event listeners set up")
+            if self.debug:
+                print("Page event listeners set up")
         except Exception as e:
             print(f"Error setting up page listeners: {e}")
     
@@ -232,7 +233,8 @@ class NetworkMonitor:
         # Add handler for responses to attempt to decode SSE streams
         self.page.on("response", self._check_for_sse)
         
-        print("✅ Basic event listeners set up")
+        if self.debug:
+            print("Basic event listeners set up")
         
     async def _setup_network_interception(self):
         """Set up request interception after page is loaded"""
@@ -258,7 +260,8 @@ class NetworkMonitor:
         # Set up handler for Fetch events
         self.client.on("Fetch.requestPaused", self._handle_fetch_request)
         
-        print("✅ Network interception enabled")
+        if self.debug:
+            print("Network interception enabled")
     
     async def _handle_fetch_request(self, event):
         """Handle a fetch request interception"""
@@ -282,8 +285,7 @@ class NetworkMonitor:
                 
                 # Check if it's an SSE stream
                 if "text/event-stream" in content_type or "text/event-stream" in headers.get("Content-Type", ""):
-                    print(f"🔄 Detected SSE stream: {url}")
-                    
+                    # Start streaming the response
                     try:
                         # Start streaming the response
                         reader = response.body_stream()
@@ -299,8 +301,6 @@ class NetworkMonitor:
                         # Write each chunk to the file as we receive it
                         with open(filename, "wb") as raw_file, open(decoded_filename, "w") as decoded_file:
                             try:
-                                print(f"📝 Streaming SSE data to {filename} and decoding to {decoded_filename}")
-                                
                                 while True:
                                     chunk = await reader.read(1024)
                                     if not chunk:
@@ -347,26 +347,15 @@ class NetworkMonitor:
                                                             self.assembled_content += raw_json["text"]
                                                     except:
                                                         pass
-                                        
-                                        # Periodically update the full response file
-                                        if self.assembled_content:
-                                            with open(full_response_filename, "w") as f:
-                                                f.write(self.assembled_content)
-                                            if full_response_filename not in self.saved_files:
-                                                self.saved_files.append(full_response_filename)
                                     
                                     except Exception as e:
-                                        if self.debug:
-                                            print(f"Error decoding chunk: {e}")
+                                        pass
                             
                             except Exception as e:
-                                print(f"Error during stream reading: {e}")
-                                if self.debug:
-                                    traceback.print_exc()
+                                pass
                         
                         self.saved_files.append(filename)
                         self.saved_files.append(decoded_filename)
-                        print(f"📝 Completed saving SSE stream to {filename} and decoded events to {decoded_filename}")
                         
                         # Process the full stream content
                         full_data = b"".join(chunks)
@@ -380,14 +369,11 @@ class NetworkMonitor:
                                 f.write(self.assembled_content)
                             if clean_filename not in self.saved_files:
                                 self.saved_files.append(clean_filename)
-                            print(f"📝 Saved fully assembled response to {clean_filename}")
                     
                     except Exception as e:
-                        print(f"Error handling SSE stream: {e}")
-                        if self.debug:
-                            traceback.print_exc()
+                        pass
             except Exception as e:
-                print(f"Error checking headers for SSE: {e}")
+                pass
     
     def _parse_sse_stream(self, data: Union[bytes, str]) -> List[Dict[str, Any]]:
         """
@@ -571,17 +557,17 @@ class NetworkMonitor:
             "timestamp": time.time()
         })
         
-        # Only print and save if after prompt submission
-        if self.prompt_submitted:
+        # Only print and save if after prompt submission and in debug mode
+        if self.prompt_submitted and self.debug:
             if "v0.dev/chat/" in url and "_rsc=" in url:
-                print(f"🔍 [{method}] CONTENT REQUEST: {url}")
+                print(f"[{method}] CONTENT REQUEST: {url}")
             elif "v0.dev/chat/api/send" in url:
-                print(f"⭐ [{method}] PROMPT SEND ENDPOINT: {url}")
+                print(f"[{method}] PROMPT SEND ENDPOINT: {url}")
                 # Save POST data
                 if method == "POST" and request.get("postData"):
                     self._save_request_payload(request_id, url, request.get("postData"))
             elif any(keyword in url for keyword in ["v0.dev", "vercel", "_stream", "api", "heap"]):
-                print(f"📤 [{method}] {url}")
+                print(f"[{method}] {url}")
     
     def _handle_response_received(self, event):
         """Handle response headers received events using CDP"""
@@ -607,20 +593,25 @@ class NetworkMonitor:
             "timestamp": time.time()
         })
         
-        # Only print if after prompt submission
-        if self.prompt_submitted:
+        # Only print if after prompt submission and in debug mode
+        if self.prompt_submitted and self.debug:
             # Special handling for v0.dev content responses
             if "v0.dev/chat/" in url and "_rsc=" in url:
-                print(f"🔍 [{status}] CONTENT RESPONSE: {url}")
+                print(f"[{status}] CONTENT RESPONSE: {url}")
                 # Create a task to capture this response specifically
                 task = asyncio.create_task(self._capture_content_response(request_id, url))
                 self.pending_tasks.append(task)
             elif "v0.dev/chat/api/send" in url:
-                print(f"⭐ [{status}] RESPONSE FROM SEND ENDPOINT: {url}")
+                print(f"[{status}] RESPONSE FROM SEND ENDPOINT: {url}")
             elif "_stream" in url:
-                print(f"🔄 [{status}] STREAM: {url}")
+                print(f"[{status}] STREAM: {url}")
             elif any(keyword in url for keyword in ["v0.dev", "vercel", "api", "heap"]):
-                print(f"📥 [{status}] {url}")
+                print(f"[{status}] {url}")
+        elif self.prompt_submitted:
+            # Always capture important responses even if not in debug mode
+            if "v0.dev/chat/" in url and "_rsc=" in url:
+                task = asyncio.create_task(self._capture_content_response(request_id, url))
+                self.pending_tasks.append(task)
     
     async def _capture_content_response(self, request_id, url):
         """Capture and save content responses from v0.dev"""
@@ -664,7 +655,6 @@ class NetworkMonitor:
             with open(filename, "w") as f:
                 f.write(body_text)
             
-            print(f"📝 Saved content response to {filename}")
             self.saved_files.append(filename)
             
             # Also save as JSON if it looks like JSON
@@ -674,7 +664,6 @@ class NetworkMonitor:
                     json_filename = f"{self.capture_dir}/{file_name}_{timestamp}.json"
                     with open(json_filename, "w") as f:
                         json.dump(json_data, f, indent=2)
-                    print(f"📝 Saved JSON content to {json_filename}")
                     self.saved_files.append(json_filename)
                 except:
                     pass
@@ -686,12 +675,9 @@ class NetworkMonitor:
                 f.write(body_text)
             if consistent_filename not in self.saved_files:
                 self.saved_files.append(consistent_filename)
-            print(f"📝 Updated latest response file: {consistent_filename}")
-                    
+                
         except Exception as e:
-            print(f"Error capturing content response for {url}: {e}")
-            if self.debug:
-                traceback.print_exc()
+            pass
     
     def _handle_response_finished(self, event):
         """Handle response body finished loading events using CDP"""
@@ -827,20 +813,23 @@ class NetworkMonitor:
                 json_data = json.loads(post_data)
                 with open(filename, "w") as f:
                     json.dump(json_data, f, indent=2)
-                print(f"📝 Saved request payload to {filename}")
+                if self.debug:
+                    print(f"Saved request payload to {filename}")
                 self.saved_files.append(filename)
                 
-                # Print prompt if found
-                if "prompt" in json_data:
-                    print(f"📤 DETECTED PROMPT: {json_data['prompt'][:100]}...")
+                # Print prompt if found and in debug mode
+                if "prompt" in json_data and self.debug:
+                    print(f"DETECTED PROMPT: {json_data['prompt'][:100]}...")
             except:
                 # Save as plain text
                 with open(filename, "w") as f:
                     f.write(post_data)
-                print(f"📝 Saved request payload to {filename}")
+                if self.debug:
+                    print(f"Saved request payload to {filename}")
                 self.saved_files.append(filename)
         except Exception as e:
-            print(f"Error saving request payload: {e}")
+            if self.debug:
+                print(f"Error saving request payload: {e}")
     
     def _log_websocket(self, websocket):
         """Log websocket connection"""
@@ -854,29 +843,31 @@ class NetworkMonitor:
         }
         self.network_log.append(event)
         
-        # Only print if after prompt submission
-        if self.prompt_submitted:
-            print(f"🔌 WebSocket connected: {url}")
-            
-            # Setup message listeners with payload capture
-            websocket.on("message", lambda msg: self._log_websocket_message(websocket, msg))
+        # Only print if after prompt submission and in debug mode
+        if self.prompt_submitted and self.debug:
+            print(f"WebSocket connected: {url}")
+        
+        # Setup message listeners with payload capture
+        websocket.on("message", lambda msg: self._log_websocket_message(websocket, msg))
     
     def _log_websocket_message(self, websocket, message):
         """Log and capture websocket messages"""
         if not self.prompt_submitted:
             return
-            
+        
         timestamp = int(time.time())
         url_part = websocket.url.split("/")[-1].split("?")[0][:30]
         filename = f"{self.capture_dir}/ws_{url_part}_{timestamp}.txt"
         
-        print(f"📨 WebSocket message on {websocket.url} ({len(message)} bytes)")
+        if self.debug:
+            print(f"WebSocket message on {websocket.url} ({len(message)} bytes)")
         
         # Save the message content
         try:
             with open(filename, "w") as f:
                 f.write(message)
-            print(f"📝 Saved WebSocket message to {filename}")
+            if self.debug:
+                print(f"Saved WebSocket message to {filename}")
             self.saved_files.append(filename)
             
             # Try to parse as JSON
@@ -885,12 +876,14 @@ class NetworkMonitor:
                 json_filename = f"{self.capture_dir}/ws_{url_part}_{timestamp}.json"
                 with open(json_filename, "w") as f:
                     json.dump(json_data, f, indent=2)
-                print(f"📝 Saved parsed WebSocket JSON to {json_filename}")
+                if self.debug:
+                    print(f"Saved parsed WebSocket JSON to {json_filename}")
                 self.saved_files.append(json_filename)
             except:
                 pass
         except Exception as e:
-            print(f"Error saving WebSocket message: {e}")
+            if self.debug:
+                print(f"Error saving WebSocket message: {e}")
     
     async def submit_prompt(self, prompt: str, wait_time: float = 2.0):
         """Type and submit a prompt to v0.dev"""
@@ -901,30 +894,72 @@ class NetworkMonitor:
         await self.page.wait_for_selector("textarea", state="visible", timeout=30000)
         
         # Type the prompt
-        print(f"\n🔤 Entering prompt: '{prompt}'")
+        print("Entering prompt...")
         await self.page.fill("textarea", prompt)
         
         # Allow some time for the UI to register the text
         await asyncio.sleep(wait_time)
         
-        # Press Enter to submit
-        print("🚀 Submitting prompt...")
-        await self.page.press("textarea", "Enter")
+        # Try multiple methods to submit the prompt
+        print("Submitting prompt...")
+        
+        # Method 1: Try to find and click a send button
+        try:
+            # Look for various button selectors that might be the send button
+            selectors = [
+                "button[type='submit']", 
+                "button.send-button", 
+                "button:has(svg)",
+                "button:right-of(textarea)",
+                "button[aria-label='Send message']",
+                "button[aria-label='Submit']",
+                "button.submit",
+                "button.submit-button"
+            ]
+            
+            for selector in selectors:
+                button = await self.page.query_selector(selector)
+                if button:
+                    await button.click()
+                    print("Prompt submitted via button click")
+                    break
+            else:
+                # If no button found with selectors, try to find any button near the textarea
+                textarea = await self.page.query_selector("textarea")
+                if textarea:
+                    # Get the bounding box of the textarea
+                    bbox = await textarea.bounding_box()
+                    if bbox:
+                        # Click in the area to the right of the textarea (where send buttons often are)
+                        await self.page.mouse.click(
+                            bbox["x"] + bbox["width"] + 20, 
+                            bbox["y"] + bbox["height"] / 2
+                        )
+                        print("Prompt submitted via click near textarea")
+                    else:
+                        # Fallback to Enter key
+                        await self.page.press("textarea", "Enter")
+                        print("Prompt submitted via Enter key")
+                else:
+                    # Fallback to Enter key
+                    await self.page.press("textarea", "Enter")
+                    print("Prompt submitted via Enter key")
+        except Exception as e:
+            # Fallback to pressing Enter if any error occurs
+            await self.page.press("textarea", "Enter")
+            print("Prompt submitted via Enter key (after error)")
         
         # Set the flag that we've submitted the prompt - now we can start logging
         self.prompt_submitted = True
         
-        print("\n📝 Prompt submitted - monitoring network traffic for responses")
-        print("-" * 80)
-        
+        print("Monitoring for responses...")
+    
     async def await_pending_tasks(self):
         """Wait for all pending tasks to complete"""
         if self.pending_tasks:
-            print(f"Waiting for {len(self.pending_tasks)} pending capture tasks to complete...")
             await asyncio.gather(*self.pending_tasks, return_exceptions=True)
             self.pending_tasks = []
-            print("All capture tasks completed.")
-        
+    
     def print_network_summary(self):
         """Print summary of network activity after prompt submission"""
         if not self.prompt_submitted or not self.network_log:
@@ -1021,7 +1056,7 @@ class NetworkMonitor:
             if len(self.saved_files) > 10:
                 print(f"  ... and {len(self.saved_files) - 10} more files")
 
-async def monitor_v0_interactions(prompt="Build a calendar app with month and day view"):
+async def monitor_v0_interactions(prompt):
     """Main function to monitor v0.dev interactions with a specific prompt"""
     # Configure browser
     config = BrowserConfig(
@@ -1033,7 +1068,7 @@ async def monitor_v0_interactions(prompt="Build a calendar app with month and da
     
     # Initialize browser and monitor
     browser = Browser(config)
-    monitor = NetworkMonitor(browser, debug=True)  # Enable debug mode for more info
+    monitor = NetworkMonitor(browser, debug=False)  # Disable debug mode for less output
     
     try:
         # Set up page and monitoring
@@ -1042,69 +1077,26 @@ async def monitor_v0_interactions(prompt="Build a calendar app with month and da
         # Submit the prompt and wait for responses
         await monitor.submit_prompt(prompt)
         
-        print("\n🔍 Capturing network activity and saving payloads...")
-        print("Check the 'captures' directory for saved request/response data")
-        print("Monitoring indefinitely until you press Ctrl+C to stop...")
-        print("(This allows time for v0.dev to generate a complete response)")
+        print("Monitoring network traffic. Press Ctrl+C to stop.")
         
         # Wait indefinitely, checking for user input to stop
         try:
             while True:
-                print("Still monitoring... Press Ctrl+C to stop when you see the complete response", end="\r")
                 await asyncio.sleep(1)
         except KeyboardInterrupt:
-            print("\n\nMonitoring stopped by user.")
+            print("\nMonitoring stopped.")
         
-        print("\nProcessing pending tasks...")
+        # Process pending tasks
         await monitor.await_pending_tasks()
         
-        # Print summary of what we captured
-        monitor.print_network_summary()
-        
-        print("\nPress Enter to view captures directory contents...")
-        input()
-        
-        # Show the contents of the captures directory
-        capture_dir = os.path.abspath(monitor.capture_dir)
-        print(f"\n📁 Contents of {capture_dir}:")
-        try:
-            files = os.listdir(capture_dir)
-            if files:
-                for i, file in enumerate(sorted(files), 1):
-                    file_path = os.path.join(capture_dir, file)
-                    size = os.path.getsize(file_path)
-                    print(f"  {i}. {file} ({size} bytes)")
-                    
-                    # For text files containing "full_response" or "assembled_content", show a preview
-                    if file.endswith(".txt") and ("full_response" in file or "assembled_content" in file):
-                        try:
-                            with open(file_path, "r") as f:
-                                content = f.read(500)  # Read first 500 chars
-                                if content:
-                                    print(f"    Preview: {content[:100]}...")
-                        except:
-                            pass
-            else:
-                print("  (directory is empty)")
-        except Exception as e:
-            print(f"  Error listing directory: {e}")
+        # Print minimal summary
+        print("Capture complete.")
             
-        print("\nPress Enter to exit...")
-        input()
-        
     except Exception as e:
-        print(f"An error occurred: {e}")
-        traceback.print_exc()
+        print(f"Error: {e}")
     finally:
-        try:
-            # Wait for pending tasks to complete
-            if hasattr(monitor, 'pending_tasks') and monitor.pending_tasks:
-                await asyncio.gather(*monitor.pending_tasks, return_exceptions=True)
-        except:
-            pass
-            
-        # Clean up resources (this will keep the user's Chrome open)
-        await browser.close() 
+        # Clean up resources
+        await browser.close()
 
 def extract_v0_response(captured_file_path):
     """
