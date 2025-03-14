@@ -291,6 +291,7 @@ class NetworkMonitor:
                         timestamp = int(time.time())
                         filename = f"{self.capture_dir}/sse_stream_{timestamp}.jsonl"
                         decoded_filename = f"{self.capture_dir}/sse_decoded_{timestamp}.jsonl"
+                        full_response_filename = f"{self.capture_dir}/full_response_{timestamp}.txt"
                         
                         # Keep track of partial SSE data across chunks
                         partial_data = ""
@@ -333,6 +334,26 @@ class NetworkMonitor:
                                             
                                             # Store Vercel AI responses for later
                                             self.vercel_ai_responses.append(event)
+                                            
+                                            # Extract text content if available and update assembled content
+                                            if isinstance(event, dict):
+                                                if "text" in event:
+                                                    self.assembled_content += event["text"]
+                                                elif "raw" in event and isinstance(event["raw"], str):
+                                                    try:
+                                                        # Try to parse raw as JSON
+                                                        raw_json = json.loads(event["raw"])
+                                                        if isinstance(raw_json, dict) and "text" in raw_json:
+                                                            self.assembled_content += raw_json["text"]
+                                                    except:
+                                                        pass
+                                        
+                                        # Periodically update the full response file
+                                        if self.assembled_content:
+                                            with open(full_response_filename, "w") as f:
+                                                f.write(self.assembled_content)
+                                            if full_response_filename not in self.saved_files:
+                                                self.saved_files.append(full_response_filename)
                                     
                                     except Exception as e:
                                         if self.debug:
@@ -353,10 +374,13 @@ class NetworkMonitor:
                         
                         # Save the fully assembled text content
                         if self.assembled_content:
-                            with open(f"{self.capture_dir}/full_response_{timestamp}.txt", "w") as f:
+                            # Create a clean filename without timestamp for easy access
+                            clean_filename = f"{self.capture_dir}/full_response.txt"
+                            with open(clean_filename, "w") as f:
                                 f.write(self.assembled_content)
-                            self.saved_files.append(f"{self.capture_dir}/full_response_{timestamp}.txt")
-                            print(f"📝 Saved fully assembled response to full_response_{timestamp}.txt")
+                            if clean_filename not in self.saved_files:
+                                self.saved_files.append(clean_filename)
+                            print(f"📝 Saved fully assembled response to {clean_filename}")
                     
                     except Exception as e:
                         print(f"Error handling SSE stream: {e}")
@@ -431,6 +455,24 @@ class NetworkMonitor:
                                     "event_type": "message_annotations",
                                     "annotations": parsed['value']
                                 })
+                        # Handle direct text field
+                        elif isinstance(parsed, dict) and 'text' in parsed:
+                            text_content = parsed['text']
+                            assembled_text += text_content
+                            events.append({
+                                "event_type": "direct_text",
+                                "text": text_content,
+                                "assembled_text": assembled_text
+                            })
+                        # Handle content field (sometimes used instead of text)
+                        elif isinstance(parsed, dict) and 'content' in parsed:
+                            text_content = parsed['content']
+                            assembled_text += text_content
+                            events.append({
+                                "event_type": "content",
+                                "text": text_content,
+                                "assembled_text": assembled_text
+                            })
                         else:
                             # Handle other JSON formats
                             events.append(parsed)
@@ -447,6 +489,20 @@ class NetworkMonitor:
                         json_str = match.group(1)
                         json_data = json.loads(json_str)
                         events.append(json_data)
+                        if 'text' in json_data:
+                            assembled_text += json_data['text']
+                    except:
+                        pass
+                
+                # Try to extract JSON with content field
+                content_matches = re.finditer(r'data: (\{.*?"content":\s*".*?"\s*.*?\})', text)
+                for match in content_matches:
+                    try:
+                        json_str = match.group(1)
+                        json_data = json.loads(json_str)
+                        events.append(json_data)
+                        if 'content' in json_data:
+                            assembled_text += json_data['content']
                     except:
                         pass
                 
@@ -465,9 +521,16 @@ class NetworkMonitor:
             if assembled_text:
                 self.assembled_content += assembled_text
                 timestamp = int(time.time())
+                
+                # Save to timestamped file
                 with open(f"{self.capture_dir}/assembled_content_{timestamp}.txt", "w") as f:
                     f.write(self.assembled_content)
-                print(f"📝 Saved assembled text content to assembled_content_{timestamp}.txt")
+                
+                # Also save to a consistent filename for easy access
+                with open(f"{self.capture_dir}/assembled_content.txt", "w") as f:
+                    f.write(self.assembled_content)
+                
+                print(f"📝 Updated assembled text content (total: {len(self.assembled_content)} chars)")
             
             # If we still have no events, just return raw chunks
             if not events:
@@ -510,7 +573,9 @@ class NetworkMonitor:
         
         # Only print and save if after prompt submission
         if self.prompt_submitted:
-            if "v0.dev/chat/api/send" in url:
+            if "v0.dev/chat/" in url and "_rsc=" in url:
+                print(f"🔍 [{method}] CONTENT REQUEST: {url}")
+            elif "v0.dev/chat/api/send" in url:
                 print(f"⭐ [{method}] PROMPT SEND ENDPOINT: {url}")
                 # Save POST data
                 if method == "POST" and request.get("postData"):
@@ -544,12 +609,89 @@ class NetworkMonitor:
         
         # Only print if after prompt submission
         if self.prompt_submitted:
-            if "v0.dev/chat/api/send" in url:
+            # Special handling for v0.dev content responses
+            if "v0.dev/chat/" in url and "_rsc=" in url:
+                print(f"🔍 [{status}] CONTENT RESPONSE: {url}")
+                # Create a task to capture this response specifically
+                task = asyncio.create_task(self._capture_content_response(request_id, url))
+                self.pending_tasks.append(task)
+            elif "v0.dev/chat/api/send" in url:
                 print(f"⭐ [{status}] RESPONSE FROM SEND ENDPOINT: {url}")
             elif "_stream" in url:
                 print(f"🔄 [{status}] STREAM: {url}")
             elif any(keyword in url for keyword in ["v0.dev", "vercel", "api", "heap"]):
                 print(f"📥 [{status}] {url}")
+    
+    async def _capture_content_response(self, request_id, url):
+        """Capture and save content responses from v0.dev"""
+        try:
+            # Get the response body using CDP
+            result = await self.client.send("Network.getResponseBody", {"requestId": request_id})
+            
+            body = result.get("body", "")
+            base64_encoded = result.get("base64Encoded", False)
+            
+            # Decode base64 if needed
+            if base64_encoded and body:
+                body_bytes = base64.b64decode(body)
+                body_text = body_bytes.decode('utf-8', errors='ignore')
+            else:
+                body_text = body
+            
+            # Create a unique filename based on the URL
+            timestamp = int(time.time())
+            
+            # Extract a meaningful name from the URL
+            url_parts = url.split('/')
+            file_name = None
+            
+            # Look for meaningful segments in the URL
+            for part in url_parts:
+                if part.startswith("chat/") and len(part) > 5:
+                    file_name = part.split('?')[0]  # Remove query parameters
+                    break
+            
+            if not file_name:
+                # Fallback to the last part of the URL
+                file_name = url_parts[-1].split('?')[0]
+            
+            # Clean up the filename
+            file_name = file_name.replace('/', '_').replace('?', '_').replace('=', '_')
+            
+            # Save the response
+            filename = f"{self.capture_dir}/{file_name}_{timestamp}.txt"
+            
+            with open(filename, "w") as f:
+                f.write(body_text)
+            
+            print(f"📝 Saved content response to {filename}")
+            self.saved_files.append(filename)
+            
+            # Also save as JSON if it looks like JSON
+            if body_text.strip().startswith('{') or body_text.strip().startswith('['):
+                try:
+                    json_data = json.loads(body_text)
+                    json_filename = f"{self.capture_dir}/{file_name}_{timestamp}.json"
+                    with open(json_filename, "w") as f:
+                        json.dump(json_data, f, indent=2)
+                    print(f"📝 Saved JSON content to {json_filename}")
+                    self.saved_files.append(json_filename)
+                except:
+                    pass
+                    
+            # Save to a consistent filename for the latest response
+            # This will be overwritten with each new response
+            consistent_filename = f"{self.capture_dir}/latest_response.txt"
+            with open(consistent_filename, "w") as f:
+                f.write(body_text)
+            if consistent_filename not in self.saved_files:
+                self.saved_files.append(consistent_filename)
+            print(f"📝 Updated latest response file: {consistent_filename}")
+                    
+        except Exception as e:
+            print(f"Error capturing content response for {url}: {e}")
+            if self.debug:
+                traceback.print_exc()
     
     def _handle_response_finished(self, event):
         """Handle response body finished loading events using CDP"""
@@ -902,15 +1044,18 @@ async def monitor_v0_interactions(prompt="Build a calendar app with month and da
         
         print("\n🔍 Capturing network activity and saving payloads...")
         print("Check the 'captures' directory for saved request/response data")
-        print("Monitoring for 60 seconds to capture all responses (v0.dev can take time to generate)...")
+        print("Monitoring indefinitely until you press Ctrl+C to stop...")
+        print("(This allows time for v0.dev to generate a complete response)")
         
-        # Wait for some time to capture network activity (extended for more time to capture responses)
-        # v0.dev responses can take a while, especially for complex prompts
-        for i in range(60):
-            print(f"Capturing... {i+1}/60 seconds", end="\r")
-            await asyncio.sleep(1)
+        # Wait indefinitely, checking for user input to stop
+        try:
+            while True:
+                print("Still monitoring... Press Ctrl+C to stop when you see the complete response", end="\r")
+                await asyncio.sleep(1)
+        except KeyboardInterrupt:
+            print("\n\nMonitoring stopped by user.")
         
-        print("\nCapture period complete. Processing pending tasks...")
+        print("\nProcessing pending tasks...")
         await monitor.await_pending_tasks()
         
         # Print summary of what we captured

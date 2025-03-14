@@ -25,6 +25,9 @@ async def main_automation(prompt=None):
     print("Prompt will be submitted automatically:")
     print(f"Prompt: {prompt}")
     print("-" * 80)
+    print("NOTE: The script will monitor indefinitely until you press Ctrl+C to stop")
+    print("Wait until you see the complete response in the v0.dev UI before stopping")
+    print("-" * 80)
     
     # Use our monitor_v0_interactions function from tools.py with the detailed prompt
     await monitor_v0_interactions(prompt)
@@ -54,6 +57,47 @@ def extract_response(file_path):
     else:
         print(f"Could not extract response from {file_path}")
 
+def get_latest_response():
+    """Get the latest response from the consistent filename or find the most recent file"""
+    captures_dir = "captures"
+    if not os.path.exists(captures_dir):
+        print(f"Error: Captures directory not found at {captures_dir}")
+        return None
+    
+    # First check for consistent filenames
+    consistent_files = [
+        os.path.join(captures_dir, "latest_response.txt"),
+        os.path.join(captures_dir, "full_response.txt"),
+        os.path.join(captures_dir, "assembled_content.txt")
+    ]
+    
+    for file_path in consistent_files:
+        if os.path.exists(file_path):
+            print(f"Found consistent response file: {file_path}")
+            with open(file_path, 'r') as f:
+                return f.read()
+    
+    # If no consistent file, find the most recent response file
+    files = os.listdir(captures_dir)
+    response_files = [f for f in files if (
+        f.endswith('.txt') and 
+        not f.startswith('batch_') and 
+        not f.startswith('raw_') and
+        not f.startswith('sse_')
+    )]
+    
+    if not response_files:
+        print("No response files found in captures directory")
+        return None
+    
+    # Sort by modification time (most recent first)
+    response_files.sort(key=lambda f: os.path.getmtime(os.path.join(captures_dir, f)), reverse=True)
+    latest_file = os.path.join(captures_dir, response_files[0])
+    
+    print(f"Found most recent response file: {latest_file}")
+    with open(latest_file, 'r') as f:
+        return f.read()
+
 def list_captures():
     """List all captured files in the captures directory"""
     captures_dir = "captures"
@@ -67,7 +111,27 @@ def list_captures():
         return
 
     print(f"\nFound {len(files)} captured files:")
+    
+    # First show consistent files if they exist
+    consistent_files = ["latest_response.txt", "full_response.txt", "assembled_content.txt"]
+    for file in consistent_files:
+        file_path = os.path.join(captures_dir, file)
+        if os.path.exists(file_path):
+            size = os.path.getsize(file_path)
+            print(f"  ⭐ {file} ({size} bytes) - LATEST RESPONSE")
+            try:
+                with open(file_path, 'r') as f:
+                    content = f.read(200)  # Get a short preview
+                    if content:
+                        print(f"      Preview: {content[:100]}...")
+            except Exception:
+                pass
+    
+    # Then show all other files
     for i, file in enumerate(files, 1):
+        if file in consistent_files:
+            continue  # Skip consistent files as they were already shown
+            
         file_path = os.path.join(captures_dir, file)
         size = os.path.getsize(file_path)
         print(f"  {i:2d}. {file} ({size} bytes)")
@@ -99,6 +163,9 @@ def main():
     # List command
     subparsers.add_parser('list', help='List all captured files')
     
+    # Latest command
+    subparsers.add_parser('latest', help='Get the latest response without specifying a file')
+    
     args = parser.parse_args()
     
     try:
@@ -109,6 +176,16 @@ def main():
             extract_response(args.file)
         elif args.command == 'list':
             list_captures()
+        elif args.command == 'latest':
+            response = get_latest_response()
+            if response:
+                print("\n" + "=" * 80)
+                print("LATEST RESPONSE:")
+                print("=" * 80)
+                print(response)
+                print("=" * 80)
+            else:
+                print("No response found. Run the monitor command first.")
         else:
             parser.print_help()
     except KeyboardInterrupt:
