@@ -291,84 +291,117 @@ class NetworkMonitor:
                         reader = response.body_stream()
                         chunks = []
                         timestamp = int(time.time())
-                        filename = f"{self.capture_dir}/sse_stream_{timestamp}.jsonl"
-                        decoded_filename = f"{self.capture_dir}/sse_decoded_{timestamp}.jsonl"
-                        full_response_filename = f"{self.capture_dir}/full_response_{timestamp}.txt"
                         
-                        # Keep track of partial SSE data across chunks
-                        partial_data = ""
-                        
-                        # Write each chunk to the file as we receive it
-                        with open(filename, "wb") as raw_file, open(decoded_filename, "w") as decoded_file:
-                            try:
-                                while True:
-                                    chunk = await reader.read(1024)
-                                    if not chunk:
-                                        break
-                                    
-                                    # Save the raw chunk
-                                    chunks.append(chunk)
-                                    raw_file.write(chunk)
-                                    
-                                    # Try to decode and parse this chunk
-                                    try:
-                                        chunk_text = chunk.decode('utf-8', errors='ignore')
-                                        
-                                        # Combine with any partial data from previous chunk
-                                        combined_text = partial_data + chunk_text
-                                        
-                                        # If we have incomplete lines, save them for the next chunk
-                                        lines = combined_text.split('\n')
-                                        if not combined_text.endswith('\n'):
-                                            partial_data = lines.pop()
-                                        else:
-                                            partial_data = ""
-                                            
-                                        # Parse the complete lines in this chunk
-                                        events = parse_sse_chunk('\n'.join(lines))
-                                        
-                                        # Write decoded events to file
-                                        for event in events:
-                                            decoded_file.write(json.dumps(event) + "\n")
-                                            decoded_file.flush()  # Ensure data is written immediately
-                                            
-                                            # Store Vercel AI responses for later
-                                            self.vercel_ai_responses.append(event)
-                                            
-                                            # Extract text content if available and update assembled content
-                                            if isinstance(event, dict):
-                                                if "text" in event:
-                                                    self.assembled_content += event["text"]
-                                                elif "raw" in event and isinstance(event["raw"], str):
-                                                    try:
-                                                        # Try to parse raw as JSON
-                                                        raw_json = json.loads(event["raw"])
-                                                        if isinstance(raw_json, dict) and "text" in raw_json:
-                                                            self.assembled_content += raw_json["text"]
-                                                    except:
-                                                        pass
-                                    
-                                    except Exception as e:
-                                        pass
+                        # Only save if the URL contains "chat"
+                        if "chat" in url.lower():
+                            filename = f"{self.capture_dir}/sse_stream_{timestamp}.jsonl"
+                            decoded_filename = f"{self.capture_dir}/sse_decoded_{timestamp}.jsonl"
+                            full_response_filename = f"{self.capture_dir}/full_response_{timestamp}.txt"
                             
-                            except Exception as e:
-                                pass
-                        
-                        self.saved_files.append(filename)
-                        self.saved_files.append(decoded_filename)
-                        
-                        # Process the full stream content
-                        full_data = b"".join(chunks)
-                        events = self._parse_sse_stream(full_data)
-                        
-                        # Save the fully assembled text content
-                        if self.assembled_content:
-                            # Create a clean filename without timestamp for easy access
-                            clean_filename = f"{self.capture_dir}/full_response.txt"
-                            with open(clean_filename, "w") as f:
-                                f.write(self.assembled_content)
-                            if clean_filename not in self.saved_files:
-                                self.saved_files.append(clean_filename)
+                            # Keep track of partial SSE data across chunks
+                            partial_data = ""
+                            
+                            # Write each chunk to the file as we receive it
+                            with open(filename, "wb") as raw_file, open(decoded_filename, "w") as decoded_file:
+                                try:
+                                    while True:
+                                        chunk = await reader.read(1024)
+                                        if not chunk:
+                                            break
+                                        
+                                        # Save the raw chunk
+                                        chunks.append(chunk)
+                                        raw_file.write(chunk)
+                                        
+                                        # Try to decode and parse this chunk
+                                        try:
+                                            chunk_text = chunk.decode('utf-8', errors='ignore')
+                                            
+                                            # Combine with any partial data from previous chunk
+                                            combined_text = partial_data + chunk_text
+                                            
+                                            # If we have incomplete lines, save them for the next chunk
+                                            lines = combined_text.split('\n')
+                                            if not combined_text.endswith('\n'):
+                                                partial_data = lines.pop()
+                                            else:
+                                                partial_data = ""
+                                                
+                                            # Parse the complete lines in this chunk
+                                            events = parse_sse_chunk('\n'.join(lines))
+                                            
+                                            # Write decoded events to file
+                                            for event in events:
+                                                decoded_file.write(json.dumps(event) + "\n")
+                                                decoded_file.flush()  # Ensure data is written immediately
+                                                
+                                                # Store Vercel AI responses for later
+                                                self.vercel_ai_responses.append(event)
+                                                
+                                                # Extract text content if available and update assembled content
+                                                if isinstance(event, dict):
+                                                    if "text" in event:
+                                                        self.assembled_content += event["text"]
+                                                    elif "raw" in event and isinstance(event["raw"], str):
+                                                        try:
+                                                            # Try to parse raw as JSON
+                                                            raw_json = json.loads(event["raw"])
+                                                            if isinstance(raw_json, dict) and "text" in raw_json:
+                                                                self.assembled_content += raw_json["text"]
+                                                        except:
+                                                            pass
+                                        
+                                        except Exception as e:
+                                            pass
+                                
+                                except Exception as e:
+                                    pass
+                            
+                            self.saved_files.append(filename)
+                            self.saved_files.append(decoded_filename)
+                            
+                            # Process the full stream content
+                            full_data = b"".join(chunks)
+                            events = self._parse_sse_stream(full_data)
+                            
+                            # Save the fully assembled text content
+                            if self.assembled_content:
+                                # Create a clean filename without timestamp for easy access
+                                clean_filename = f"{self.capture_dir}/full_response.txt"
+                                with open(clean_filename, "w") as f:
+                                    f.write(self.assembled_content)
+                                if clean_filename not in self.saved_files:
+                                    self.saved_files.append(clean_filename)
+                        else:
+                            # Still process the stream to extract content, but don't save files
+                            while True:
+                                chunk = await reader.read(1024)
+                                if not chunk:
+                                    break
+                                chunks.append(chunk)
+                                
+                                # Try to decode and extract text
+                                try:
+                                    chunk_text = chunk.decode('utf-8', errors='ignore')
+                                    events = parse_sse_chunk(chunk_text)
+                                    
+                                    # Store Vercel AI responses for later
+                                    self.vercel_ai_responses.extend(events)
+                                    
+                                    # Extract text content if available
+                                    for event in events:
+                                        if isinstance(event, dict):
+                                            if "text" in event:
+                                                self.assembled_content += event["text"]
+                                            elif "raw" in event and isinstance(event["raw"], str):
+                                                try:
+                                                    raw_json = json.loads(event["raw"])
+                                                    if isinstance(raw_json, dict) and "text" in raw_json:
+                                                        self.assembled_content += raw_json["text"]
+                                                except:
+                                                    pass
+                                except:
+                                    pass
                     
                     except Exception as e:
                         pass
@@ -506,17 +539,20 @@ class NetworkMonitor:
             # If we have extracted content, save the assembled text
             if assembled_text:
                 self.assembled_content += assembled_text
-                timestamp = int(time.time())
                 
-                # Save to timestamped file
-                with open(f"{self.capture_dir}/assembled_content_{timestamp}.txt", "w") as f:
-                    f.write(self.assembled_content)
-                
-                # Also save to a consistent filename for easy access
-                with open(f"{self.capture_dir}/assembled_content.txt", "w") as f:
-                    f.write(self.assembled_content)
-                
-                print(f"📝 Updated assembled text content (total: {len(self.assembled_content)} chars)")
+                # Only save files if we're processing chat-related content
+                if any("chat" in str(event) for event in events):
+                    timestamp = int(time.time())
+                    
+                    # Save to timestamped file
+                    with open(f"{self.capture_dir}/assembled_content_{timestamp}.txt", "w") as f:
+                        f.write(self.assembled_content)
+                    
+                    # Also save to a consistent filename for easy access
+                    with open(f"{self.capture_dir}/assembled_content.txt", "w") as f:
+                        f.write(self.assembled_content)
+                    
+                    print(f"📝 Updated assembled text content (total: {len(self.assembled_content)} chars)")
             
             # If we still have no events, just return raw chunks
             if not events:
@@ -649,32 +685,34 @@ class NetworkMonitor:
             # Clean up the filename
             file_name = file_name.replace('/', '_').replace('?', '_').replace('=', '_')
             
-            # Save the response
-            filename = f"{self.capture_dir}/{file_name}_{timestamp}.txt"
-            
-            with open(filename, "w") as f:
-                f.write(body_text)
-            
-            self.saved_files.append(filename)
-            
-            # Also save as JSON if it looks like JSON
-            if body_text.strip().startswith('{') or body_text.strip().startswith('['):
-                try:
-                    json_data = json.loads(body_text)
-                    json_filename = f"{self.capture_dir}/{file_name}_{timestamp}.json"
-                    with open(json_filename, "w") as f:
-                        json.dump(json_data, f, indent=2)
-                    self.saved_files.append(json_filename)
-                except:
-                    pass
-                    
-            # Save to a consistent filename for the latest response
-            # This will be overwritten with each new response
-            consistent_filename = f"{self.capture_dir}/latest_response.txt"
-            with open(consistent_filename, "w") as f:
-                f.write(body_text)
-            if consistent_filename not in self.saved_files:
-                self.saved_files.append(consistent_filename)
+            # Only save if the URL contains "chat"
+            if "chat" in url.lower():
+                # Save the response
+                filename = f"{self.capture_dir}/{file_name}_{timestamp}.txt"
+                
+                with open(filename, "w") as f:
+                    f.write(body_text)
+                
+                self.saved_files.append(filename)
+                
+                # Also save as JSON if it looks like JSON
+                if body_text.strip().startswith('{') or body_text.strip().startswith('['):
+                    try:
+                        json_data = json.loads(body_text)
+                        json_filename = f"{self.capture_dir}/{file_name}_{timestamp}.json"
+                        with open(json_filename, "w") as f:
+                            json.dump(json_data, f, indent=2)
+                        self.saved_files.append(json_filename)
+                    except:
+                        pass
+                        
+                # Save to a consistent filename for the latest response
+                # This will be overwritten with each new response
+                consistent_filename = f"{self.capture_dir}/latest_response.txt"
+                with open(consistent_filename, "w") as f:
+                    f.write(body_text)
+                if consistent_filename not in self.saved_files:
+                    self.saved_files.append(consistent_filename)
                 
         except Exception as e:
             pass
@@ -728,72 +766,75 @@ class NetworkMonitor:
             # Create a unique filename
             timestamp = int(time.time())
             url_part = url.split("/")[-1].split("?")[0][:30]
-            filename = f"{self.capture_dir}/{url_part}_{timestamp}"
             
-            # For SSE streams, try to parse them
-            if "text/event-stream" in content_type:
-                events = self._parse_sse_stream(body_bytes)
-                if events:
-                    json_filename = f"{filename}_sse.jsonl"
-                    with open(json_filename, "w") as f:
-                        for event in events:
-                            f.write(json.dumps(event) + "\n")
-                    print(f"📝 Saved parsed SSE events to {json_filename}")
-                    self.saved_files.append(json_filename)
-                    
-                    # Also save the raw data
-                    with open(f"{filename}_sse.raw", "wb") as f:
-                        f.write(body_bytes)
-                    print(f"📝 Saved raw SSE data to {filename}_sse.raw")
-                    self.saved_files.append(f"{filename}_sse.raw")
-                    
-                    # Add to our vercel responses collection
-                    self.vercel_ai_responses.extend(events)
-                    return
-            
-            # Determine file type and save
-            if "json" in content_type.lower():
-                # Try to save as JSON
-                try:
-                    if isinstance(body_bytes, bytes):
-                        json_text = body_bytes.decode('utf-8')
-                    else:
-                        json_text = body
+            # Only save if url_part is "chat"
+            if url_part.lower() == "chat":
+                filename = f"{self.capture_dir}/{url_part}_{timestamp}"
+                
+                # For SSE streams, try to parse them
+                if "text/event-stream" in content_type:
+                    events = self._parse_sse_stream(body_bytes)
+                    if events:
+                        json_filename = f"{filename}_sse.jsonl"
+                        with open(json_filename, "w") as f:
+                            for event in events:
+                                f.write(json.dumps(event) + "\n")
+                        print(f"📝 Saved parsed SSE events to {json_filename}")
+                        self.saved_files.append(json_filename)
                         
-                    json_data = json.loads(json_text)
-                    with open(f"{filename}.json", "w") as f:
-                        json.dump(json_data, f, indent=2)
-                    print(f"📝 Saved JSON response to {filename}.json")
-                    self.saved_files.append(f"{filename}.json")
-                except Exception as e:
-                    # Save as raw if JSON parsing fails
-                    with open(f"{filename}.txt", "wb") as f:
-                        f.write(body_bytes)
-                    print(f"📝 Saved text response to {filename}.txt")
-                    self.saved_files.append(f"{filename}.txt")
-            else:
-                # Save as binary or text based on content
-                if "_stream" in url or "binary" in content_type.lower():
-                    with open(f"{filename}.bin", "wb") as f:
-                        f.write(body_bytes)
-                    print(f"📝 Saved binary response to {filename}.bin")
-                    self.saved_files.append(f"{filename}.bin")
-                    
-                    # Also try to decode as text
+                        # Also save the raw data
+                        with open(f"{filename}_sse.raw", "wb") as f:
+                            f.write(body_bytes)
+                        print(f"📝 Saved raw SSE data to {filename}_sse.raw")
+                        self.saved_files.append(f"{filename}_sse.raw")
+                        
+                        # Add to our vercel responses collection
+                        self.vercel_ai_responses.extend(events)
+                        return
+                
+                # Determine file type and save
+                if "json" in content_type.lower():
+                    # Try to save as JSON
                     try:
-                        decoded = body_bytes.decode('utf-8', errors='ignore')
-                        with open(f"{filename}_decoded.txt", "w") as f:
-                            f.write(decoded)
-                        print(f"📝 Saved decoded binary to {filename}_decoded.txt")
-                        self.saved_files.append(f"{filename}_decoded.txt")
-                    except:
-                        pass
+                        if isinstance(body_bytes, bytes):
+                            json_text = body_bytes.decode('utf-8')
+                        else:
+                            json_text = body
+                            
+                        json_data = json.loads(json_text)
+                        with open(f"{filename}.json", "w") as f:
+                            json.dump(json_data, f, indent=2)
+                        print(f"📝 Saved JSON response to {filename}.json")
+                        self.saved_files.append(f"{filename}.json")
+                    except Exception as e:
+                        # Save as raw if JSON parsing fails
+                        with open(f"{filename}.txt", "wb") as f:
+                            f.write(body_bytes)
+                        print(f"📝 Saved text response to {filename}.txt")
+                        self.saved_files.append(f"{filename}.txt")
                 else:
-                    # Save as text
-                    with open(f"{filename}.txt", "wb") as f:
-                        f.write(body_bytes)
-                    print(f"📝 Saved text response to {filename}.txt")
-                    self.saved_files.append(f"{filename}.txt")
+                    # Save as binary or text based on content
+                    if "_stream" in url or "binary" in content_type.lower():
+                        with open(f"{filename}.bin", "wb") as f:
+                            f.write(body_bytes)
+                        print(f"📝 Saved binary response to {filename}.bin")
+                        self.saved_files.append(f"{filename}.bin")
+                        
+                        # Also try to decode as text
+                        try:
+                            decoded = body_bytes.decode('utf-8', errors='ignore')
+                            with open(f"{filename}_decoded.txt", "w") as f:
+                                f.write(decoded)
+                            print(f"📝 Saved decoded binary to {filename}_decoded.txt")
+                            self.saved_files.append(f"{filename}_decoded.txt")
+                        except:
+                            pass
+                    else:
+                        # Save as text
+                        with open(f"{filename}.txt", "wb") as f:
+                            f.write(body_bytes)
+                        print(f"📝 Saved text response to {filename}.txt")
+                        self.saved_files.append(f"{filename}.txt")
         except Exception as e:
             print(f"Error saving response body for {url}: {e}")
             if self.debug:
@@ -805,28 +846,30 @@ class NetworkMonitor:
             return
             
         try:
-            timestamp = int(time.time())
-            filename = f"{self.capture_dir}/send_request_{timestamp}.json"
-            
-            # Try to parse as JSON
-            try:
-                json_data = json.loads(post_data)
-                with open(filename, "w") as f:
-                    json.dump(json_data, f, indent=2)
-                if self.debug:
-                    print(f"Saved request payload to {filename}")
-                self.saved_files.append(filename)
+            # Only save if the URL contains "chat"
+            if "chat" in url.lower():
+                timestamp = int(time.time())
+                filename = f"{self.capture_dir}/send_request_{timestamp}.json"
                 
-                # Print prompt if found and in debug mode
-                if "prompt" in json_data and self.debug:
-                    print(f"DETECTED PROMPT: {json_data['prompt'][:100]}...")
-            except:
-                # Save as plain text
-                with open(filename, "w") as f:
-                    f.write(post_data)
-                if self.debug:
-                    print(f"Saved request payload to {filename}")
-                self.saved_files.append(filename)
+                # Try to parse as JSON
+                try:
+                    json_data = json.loads(post_data)
+                    with open(filename, "w") as f:
+                        json.dump(json_data, f, indent=2)
+                    if self.debug:
+                        print(f"Saved request payload to {filename}")
+                    self.saved_files.append(filename)
+                    
+                    # Print prompt if found and in debug mode
+                    if "prompt" in json_data and self.debug:
+                        print(f"DETECTED PROMPT: {json_data['prompt'][:100]}...")
+                except:
+                    # Save as plain text
+                    with open(filename, "w") as f:
+                        f.write(post_data)
+                    if self.debug:
+                        print(f"Saved request payload to {filename}")
+                    self.saved_files.append(filename)
         except Exception as e:
             if self.debug:
                 print(f"Error saving request payload: {e}")
@@ -855,35 +898,37 @@ class NetworkMonitor:
         if not self.prompt_submitted:
             return
         
-        timestamp = int(time.time())
-        url_part = websocket.url.split("/")[-1].split("?")[0][:30]
-        filename = f"{self.capture_dir}/ws_{url_part}_{timestamp}.txt"
-        
-        if self.debug:
-            print(f"WebSocket message on {websocket.url} ({len(message)} bytes)")
-        
-        # Save the message content
-        try:
-            with open(filename, "w") as f:
-                f.write(message)
-            if self.debug:
-                print(f"Saved WebSocket message to {filename}")
-            self.saved_files.append(filename)
+        # Only save if the URL contains "chat"
+        if "chat" in websocket.url.lower():
+            timestamp = int(time.time())
+            url_part = websocket.url.split("/")[-1].split("?")[0][:30]
+            filename = f"{self.capture_dir}/ws_{url_part}_{timestamp}.txt"
             
-            # Try to parse as JSON
-            try:
-                json_data = json.loads(message)
-                json_filename = f"{self.capture_dir}/ws_{url_part}_{timestamp}.json"
-                with open(json_filename, "w") as f:
-                    json.dump(json_data, f, indent=2)
-                if self.debug:
-                    print(f"Saved parsed WebSocket JSON to {json_filename}")
-                self.saved_files.append(json_filename)
-            except:
-                pass
-        except Exception as e:
             if self.debug:
-                print(f"Error saving WebSocket message: {e}")
+                print(f"WebSocket message on {websocket.url} ({len(message)} bytes)")
+            
+            # Save the message content
+            try:
+                with open(filename, "w") as f:
+                    f.write(message)
+                if self.debug:
+                    print(f"Saved WebSocket message to {filename}")
+                self.saved_files.append(filename)
+                
+                # Try to parse as JSON
+                try:
+                    json_data = json.loads(message)
+                    json_filename = f"{self.capture_dir}/ws_{url_part}_{timestamp}.json"
+                    with open(json_filename, "w") as f:
+                        json.dump(json_data, f, indent=2)
+                    if self.debug:
+                        print(f"Saved parsed WebSocket JSON to {json_filename}")
+                    self.saved_files.append(json_filename)
+                except:
+                    pass
+            except Exception as e:
+                if self.debug:
+                    print(f"Error saving WebSocket message: {e}")
     
     async def submit_prompt(self, prompt: str, wait_time: float = 2.0):
         """Type and submit a prompt to v0.dev"""
