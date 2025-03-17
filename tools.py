@@ -252,7 +252,7 @@ class NetworkMonitor:
         # Set up event listeners for network traffic
         self.client.on("Network.requestWillBeSent", self._handle_request_sent)
         self.client.on("Network.responseReceived", self._handle_response_received)
-        self.client.on("Network.loadingFinished", self._handle_response_finished)
+        # self.client.on("Network.loadingFinished", self._handle_response_finished)
         
         # Enable Fetch domain to intercept responses for better SSE handling
         await self.client.send("Fetch.enable", {
@@ -638,17 +638,6 @@ class NetworkMonitor:
     async def _capture_content_response(self, request_id, url):
         """Capture and save content responses from v0.dev"""
         try:
-            print(f"🔍 _capture_content_response: Processing response from URL: {url}")
-            
-            # Parse URL parts
-            url_parts = url.split('/')
-            print(f"url_parts: {url_parts}")
-            
-            # Skip community, history, and projects URLs
-            if any(keyword in url for keyword in ["community", "history", "projects"]):
-                print(f"ℹ️ Skipping URL containing community, history, or projects: {url}")
-                return
-                
             # Get the response body using CDP
             result = await self.client.send("Network.getResponseBody", {"requestId": request_id})
             
@@ -666,37 +655,34 @@ class NetworkMonitor:
             timestamp = int(time.time())
             
             # Extract a meaningful name from the URL
+            url_parts = url.split('/')
+            print(f"URL parts: {url_parts}")
             file_name = None
             
             # Look for meaningful segments in the URL
             for part in url_parts:
                 if part.startswith("chat/") and len(part) > 5:
-                    file_name = part.split('?')[0]  # Remove query parameters
+                    file_name = part.split('?')[0]
                     break
             
             if not file_name:
                 # Fallback to the last part of the URL
                 file_name = url_parts[-1].split('?')[0]
-                print(f"ℹlast part of the url: {file_name}")
             
             # Clean up the filename
             file_name = file_name.replace('/', '_').replace('?', '_').replace('=', '_')
+
+            # Save the response
+            filename = f"{self.capture_dir}/{file_name}_{timestamp}.txt"
+            print(f"File name: {file_name}")
             
-            # Only save if the URL contains "chat"
-            if "chat" in url.lower():
-                # Save the response
-                filename = f"{self.capture_dir}/{file_name}_{timestamp}.txt"
-                
-                with open(filename, "w") as f:
-                    f.write(body_text)
-                
-                print(f"💾 _capture_content_response: Saved response to: {filename}")
-                self.saved_files.append(filename)
-            else:
-                print(f"ℹ️ _capture_content_response: URL doesn't contain 'chat', not saving files")
+            with open(filename, "w") as f:
+                f.write(body_text)
+            
+            self.saved_files.append(filename)
                 
         except Exception as e:
-            print(f"❌ _capture_content_response: Error capturing content: {e}")
+            pass
     
     def _handle_response_finished(self, event):
         """Handle response body finished loading events using CDP"""
@@ -723,8 +709,9 @@ class NetworkMonitor:
             return
             
         # Create a task to get and save the response body
-        task = asyncio.create_task(self._get_and_save_response_body(request_id, url))
-        self.pending_tasks.append(task)
+        # task = asyncio.create_task(self._get_and_save_response_body(request_id, url))
+        # self.pending_tasks.append(task)
+        pass
     
     async def _get_and_save_response_body(self, request_id, url):
         """Get response body and save it to file"""
