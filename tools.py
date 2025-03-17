@@ -635,79 +635,68 @@ class NetworkMonitor:
                 task = asyncio.create_task(self._capture_content_response(request_id, url))
                 self.pending_tasks.append(task)
     
-    # async def _capture_content_response(self, request_id, url):
-    #     """Capture and save content responses from v0.dev"""
-    #     try:
-    #         print(f"🔍 _capture_content_response: Processing response from URL: {url}")
-    #         # Get the response body using CDP
-    #         result = await self.client.send("Network.getResponseBody", {"requestId": request_id})
+    async def _capture_content_response(self, request_id, url):
+        """Capture and save content responses from v0.dev"""
+        try:
+            print(f"🔍 _capture_content_response: Processing response from URL: {url}")
             
-    #         body = result.get("body", "")
-    #         base64_encoded = result.get("base64Encoded", False)
+            # Parse URL parts
+            url_parts = url.split('/')
+            print(f"url_parts: {url_parts}")
             
-    #         # Decode base64 if needed
-    #         if base64_encoded and body:
-    #             body_bytes = base64.b64decode(body)
-    #             body_text = body_bytes.decode('utf-8', errors='ignore')
-    #         else:
-    #             body_text = body
-            
-    #         # Create a unique filename based on the URL
-    #         timestamp = int(time.time())
-            
-    #         # Extract a meaningful name from the URL
-    #         url_parts = url.split('/')
-    #         file_name = None
-            
-    #         # Look for meaningful segments in the URL
-    #         for part in url_parts:
-    #             if part.startswith("chat/") and len(part) > 5:
-    #                 file_name = part.split('?')[0]  # Remove query parameters
-    #                 break
-            
-    #         if not file_name:
-    #             # Fallback to the last part of the URL
-    #             file_name = url_parts[-1].split('?')[0]
-            
-    #         # Clean up the filename
-    #         file_name = file_name.replace('/', '_').replace('?', '_').replace('=', '_')
-            
-    #         # Only save if the URL contains "chat"
-    #         if "chat" in url.lower():
-    #             # Save the response
-    #             filename = f"{self.capture_dir}/{file_name}_{timestamp}.txt"
+            # Skip community, history, and projects URLs
+            if any(keyword in url for keyword in ["community", "history", "projects"]):
+                print(f"ℹ️ Skipping URL containing community, history, or projects: {url}")
+                return
                 
-    #             with open(filename, "w") as f:
-    #                 f.write(body_text)
+            # Get the response body using CDP
+            result = await self.client.send("Network.getResponseBody", {"requestId": request_id})
+            
+            body = result.get("body", "")
+            base64_encoded = result.get("base64Encoded", False)
+            
+            # Decode base64 if needed
+            if base64_encoded and body:
+                body_bytes = base64.b64decode(body)
+                body_text = body_bytes.decode('utf-8', errors='ignore')
+            else:
+                body_text = body
+            
+            # Create a unique filename based on the URL
+            timestamp = int(time.time())
+            
+            # Extract a meaningful name from the URL
+            file_name = None
+            
+            # Look for meaningful segments in the URL
+            for part in url_parts:
+                if part.startswith("chat/") and len(part) > 5:
+                    file_name = part.split('?')[0]  # Remove query parameters
+                    break
+            
+            if not file_name:
+                # Fallback to the last part of the URL
+                file_name = url_parts[-1].split('?')[0]
+                print(f"ℹlast part of the url: {file_name}")
+            
+            # Clean up the filename
+            file_name = file_name.replace('/', '_').replace('?', '_').replace('=', '_')
+            
+            # Only save if the URL contains "chat"
+            if "chat" in url.lower():
+                # Save the response
+                filename = f"{self.capture_dir}/{file_name}_{timestamp}.txt"
                 
-    #             print(f"💾 _capture_content_response: Saved response to: {filename}")
-    #             self.saved_files.append(filename)
+                with open(filename, "w") as f:
+                    f.write(body_text)
                 
-    #             # Also save as JSON if it looks like JSON
-    #             if body_text.strip().startswith('{') or body_text.strip().startswith('['):
-    #                 try:
-    #                     json_data = json.loads(body_text)
-    #                     json_filename = f"{self.capture_dir}/{file_name}_{timestamp}.json"
-    #                     with open(json_filename, "w") as f:
-    #                         json.dump(json_data, f, indent=2)
-    #                     print(f"💾 _capture_content_response: Saved JSON response to: {json_filename}")
-    #                     self.saved_files.append(json_filename)
-    #                 except:
-    #                     print(f"ℹ️ _capture_content_response: Content looked like JSON but couldn't parse it")
-                        
-    #             # Save to a consistent filename for the latest response
-    #             # This will be overwritten with each new response
-    #             consistent_filename = f"{self.capture_dir}/latest_response.txt"
-    #             with open(consistent_filename, "w") as f:
-    #                 f.write(body_text)
-    #             print(f"💾 _capture_content_response: Updated consistent response file: {consistent_filename}")
-    #             if consistent_filename not in self.saved_files:
-    #                 self.saved_files.append(consistent_filename)
-    #         else:
-    #             print(f"ℹ️ _capture_content_response: URL doesn't contain 'chat', not saving files")
+                print(f"💾 _capture_content_response: Saved response to: {filename}")
+                self.saved_files.append(filename)
+            else:
+                print(f"ℹ️ _capture_content_response: URL doesn't contain 'chat', not saving files")
                 
-    #     except Exception as e:
-    #         print(f"❌ _capture_content_response: Error capturing content: {e}")
+        except Exception as e:
+            print(f"❌ _capture_content_response: Error capturing content: {e}")
     
     def _handle_response_finished(self, event):
         """Handle response body finished loading events using CDP"""
@@ -1144,7 +1133,8 @@ async def monitor_v0_interactions(prompt):
         print(f"Error: {e}")
     finally:
         # Clean up resources
-        await browser.close()
+        # await browser.close()
+        pass
 
 def extract_v0_response(captured_file_path):
     """
