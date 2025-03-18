@@ -230,7 +230,7 @@ class NetworkMonitor:
     
     def _handle_navigation(self, frame):
         """Handle navigation events to detect chat_id changes"""
-        if frame is self.page.main_frame:
+        if frame is self.page.main_frame and not self.chat_id:  # Only proceed if chat_id isn't set yet
             url = frame.url
             if 'v0.dev/chat/' in url:
                 # Extract chat_id from URL
@@ -657,17 +657,6 @@ class NetworkMonitor:
     async def _capture_content_response(self, request_id, url):
         """Capture and save content responses from v0.dev"""
         try:
-            # Print the chat_id if we have one
-            if self.chat_id:
-                print(f"🆔 _capture_content_response: Current chat_id is {self.chat_id}")
-                
-                # Check if this URL contains our chat_id
-                if self.chat_id in url:
-                    print(f"✓ URL contains the chat_id: {self.chat_id}")
-                else:
-                    print(f"✗ URL does not contain the chat_id: {self.chat_id}")
-                    return
-            
             # Get the response body using CDP
             result = await self.client.send("Network.getResponseBody", {"requestId": request_id})
             
@@ -710,8 +699,12 @@ class NetworkMonitor:
             
             # Only save if the URL contains "chat"
             if "chat" in url.lower():
-                # Save the response
                 filename = f"{self.capture_dir}/{file_name}_{timestamp}.txt"
+
+                # Check for pattern: name-with-dashes-chatid_timestamp
+                if not re.search(r'[-\w]+-\w+_\d+', filename):
+                    print(f"filename does not match expected pattern: {filename} - not saving response")
+                    return
                 
                 with open(filename, "w") as f:
                     f.write(body_text)
@@ -1021,102 +1014,6 @@ class NetworkMonitor:
         if self.pending_tasks:
             await asyncio.gather(*self.pending_tasks, return_exceptions=True)
             self.pending_tasks = []
-    
-    def print_network_summary(self):
-        """Print summary of network activity after prompt submission"""
-        if not self.prompt_submitted or not self.network_log:
-            print("No network activity logged yet.")
-            return
-            
-        # Filter to just post-submission events
-        submission_time = 0
-        for event in self.network_log:
-            if event.get("type") == "request" and self.prompt_submitted:
-                submission_time = event.get("timestamp", 0)
-                break
-                
-        if submission_time == 0:
-            print("Could not determine prompt submission time.")
-            return
-            
-        post_submission = [e for e in self.network_log if e.get("timestamp", 0) >= submission_time]
-        
-        print("\n=== NETWORK SUMMARY ===")
-        print(f"Total network events after prompt submission: {len(post_submission)}")
-        
-        # Group by type
-        requests = [e for e in post_submission if e.get("type") == "request"]
-        responses = [e for e in post_submission if e.get("type") == "response"]
-        websockets = [e for e in post_submission if e.get("type") == "websocket"]
-        
-        print(f"Requests: {len(requests)}")
-        print(f"Responses: {len(responses)}")
-        print(f"WebSockets: {len(websockets)}")
-        
-        # Count files saved
-        print(f"Files saved to '{self.capture_dir}' directory: {len(self.saved_files)}")
-        
-        # Check if we have Vercel AI SDK responses
-        if self.vercel_ai_responses:
-            print(f"Vercel AI SDK responses captured: {len(self.vercel_ai_responses)}")
-        
-        # List important endpoints
-        print("\n=== IMPORTANT ENDPOINTS ===")
-        stream_endpoints = [e for e in post_submission if "_stream" in e.get("url", "")]
-        api_endpoints = [e for e in post_submission if "api" in e.get("url", "") and "v0.dev" in e.get("url", "")]
-        
-        # Check for the send endpoint specifically
-        send_endpoints = [e for e in post_submission if "v0.dev/chat/api/send" in e.get("url", "")]
-        if send_endpoints:
-            print("\nPrompt send endpoint:")
-            seen_urls = set()
-            for e in send_endpoints:
-                if e.get("type") == "request":
-                    url = e.get("url", "")
-                    method = e.get("method", "")
-                    if f"{method}:{url}" not in seen_urls:
-                        print(f"  - [{method}] {url}")
-                        seen_urls.add(f"{method}:{url}")
-        
-        if stream_endpoints:
-            print("\nStreaming endpoints:")
-            seen_urls = set()
-            for e in stream_endpoints:
-                url = e.get("url", "")
-                if url not in seen_urls:
-                    print(f"  - {url}")
-                    seen_urls.add(url)
-        
-        if api_endpoints:
-            print("\nAPI endpoints:")
-            seen_urls = set()
-            for e in api_endpoints:
-                url = e.get("url", "")
-                if url not in seen_urls and "send" not in url:  # Don't repeat the send endpoint
-                    print(f"  - {url}")
-                    seen_urls.add(url)
-                    
-        # Show extracted AI responses
-        if self.vercel_ai_responses:
-            print("\n=== VERCEL AI SDK RESPONSES ===")
-            for i, resp in enumerate(self.vercel_ai_responses[:5], 1):  # Show first 5 responses
-                if "text" in resp:
-                    print(f"  {i}. {resp['text'][:100]}..." if len(resp['text']) > 100 else resp['text'])
-                elif "raw" in resp:
-                    print(f"  {i}. Raw: {resp['raw'][:100]}..." if len(resp['raw']) > 100 else resp['raw'])
-                else:
-                    print(f"  {i}. {json.dumps(resp)[:100]}..." if len(json.dumps(resp)) > 100 else json.dumps(resp))
-            
-            if len(self.vercel_ai_responses) > 5:
-                print(f"  ... and {len(self.vercel_ai_responses) - 5} more responses")
-                    
-        if self.saved_files:
-            print("\n=== SAVED FILES ===")
-            for i, file in enumerate(self.saved_files[:10], 1):  # Show first 10 files
-                print(f"  {i}. {os.path.basename(file)}")
-            
-            if len(self.saved_files) > 10:
-                print(f"  ... and {len(self.saved_files) - 10} more files")
 
 async def monitor_v0_interactions(prompt):
     """Main function to monitor v0.dev interactions with a specific prompt"""
@@ -1161,110 +1058,10 @@ async def monitor_v0_interactions(prompt):
         # await browser.close()
         pass
 
-def extract_v0_response(captured_file_path):
-    """
-    Extract and process a complete response from a v0.dev captured file.
-    This function takes a capture file path and returns the cleaned content.
-    
-    Args:
-        captured_file_path: Path to the captured file (typically assembled_content or full_response)
-    
-    Returns:
-        str: The cleaned, complete response text
-    """
-    try:
-        if not os.path.exists(captured_file_path):
-            print(f"Error: File {captured_file_path} does not exist")
-            return None
-        
-        # Read the file content
-        with open(captured_file_path, 'r') as f:
-            content = f.read()
-        
-        # If this is already a clean text file, return it
-        if captured_file_path.endswith('full_response.txt') or captured_file_path.endswith('assembled_content.txt'):
-            print(f"Extracted {len(content)} characters of text from {os.path.basename(captured_file_path)}")
-            return content
-        
-        # If this is a JSONL file, parse each line and extract text content
-        if captured_file_path.endswith('.jsonl'):
-            assembled_text = ""
-            with open(captured_file_path, 'r') as f:
-                for line in f:
-                    try:
-                        data = json.loads(line.strip())
-                        # Extract text from various formats
-                        if 'text' in data:
-                            assembled_text += data['text']
-                        elif 'event_type' in data and data['event_type'] == 'data' and 'text' in data:
-                            assembled_text += data['text']
-                        elif 'value' in data and isinstance(data['value'], list):
-                            for item in data['value']:
-                                if isinstance(item, dict) and 'text' in item:
-                                    assembled_text += item['text']
-                    except:
-                        continue
-            
-            if assembled_text:
-                print(f"Extracted {len(assembled_text)} characters of text from {os.path.basename(captured_file_path)}")
-                return assembled_text
-        
-        # If this is a raw SSE stream, try to parse it
-        lines = content.split('\n')
-        assembled_text = ""
-        
-        for line in lines:
-            if line.startswith('data: '):
-                try:
-                    data_content = line[6:]
-                    json_data = json.loads(data_content)
-                    
-                    # Handle Vercel AI SDK format
-                    if isinstance(json_data, dict):
-                        if 'type' in json_data and json_data['type'] == 'data' and 'value' in json_data:
-                            for item in json_data['value']:
-                                if isinstance(item, dict) and 'text' in item:
-                                    assembled_text += item['text']
-                        elif 'text' in json_data:
-                            assembled_text += json_data['text']
-                except:
-                    pass
-        
-        if assembled_text:
-            print(f"Extracted {len(assembled_text)} characters of text from {os.path.basename(captured_file_path)}")
-            return assembled_text
-        
-        # If we couldn't extract any text, return the original content
-        print(f"Could not extract structured text. Returning raw content ({len(content)} characters)")
-        return content
-        
-    except Exception as e:
-        print(f"Error extracting v0 response: {e}")
-        traceback.print_exc()
-        return None
-
 if __name__ == "__main__":
-    """
-    Script entry point. You can also provide a file path to extract and print a response.
-    
+    """    
     Usage:
-        python tools.py                      # Run the main monitoring function
-        python tools.py extract <filepath>   # Extract and print response from a captured file
+        python tools.py
     """
-    if len(sys.argv) > 1 and sys.argv[1] == "extract":
-        if len(sys.argv) > 2:
-            filepath = sys.argv[2]
-            print(f"Extracting response from {filepath}...")
-            response = extract_v0_response(filepath)
-            if response:
-                print("\n" + "=" * 80)
-                print("EXTRACTED RESPONSE:")
-                print("=" * 80)
-                print(response)
-                print("=" * 80)
-        else:
-            print("Please provide a file path to extract from")
-            print("Usage: python tools.py extract <filepath>")
-    else:
-        # Run the main function
-        asyncio.run(monitor_v0_interactions()) 
+   
+    asyncio.run(monitor_v0_interactions()) 
