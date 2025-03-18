@@ -47,6 +47,7 @@ class NetworkMonitor:
         self.network_log = []  # Store all network requests
         self.pending_tasks = []  # Keep track of pending async tasks
         self.vercel_ai_responses = []  # Store decoded Vercel AI SDK responses
+        self.chat_id = None  # Store the chat ID extracted from the URL
         
         # Create captures directory if it doesn't exist
         self.capture_dir = "captures"
@@ -201,6 +202,9 @@ class NetworkMonitor:
             # Set up listener for console messages which may contain our captured data
             self.page.on("console", self._handle_console_message)
             
+            # Set up listener for URL changes
+            self.page.on('framenavigated', self._handle_navigation)
+            
             if self.debug:
                 print("Page event listeners set up")
         except Exception as e:
@@ -223,6 +227,21 @@ class NetworkMonitor:
         except Exception as e:
             if self.debug:
                 print(f"Error handling console message: {e}")
+    
+    def _handle_navigation(self, frame):
+        """Handle navigation events to detect chat_id changes"""
+        if frame is self.page.main_frame:
+            url = frame.url
+            if 'v0.dev/chat/' in url:
+                # Extract chat_id from URL
+                url_parts = url.split('/')
+                for i, part in enumerate(url_parts):
+                    if part == 'chat' and i < len(url_parts) - 1:
+                        potential_chat_id = url_parts[i+1].split('?')[0]  # Remove query parameters
+                        if potential_chat_id and potential_chat_id != 'api':
+                            self.chat_id = potential_chat_id
+                            print(f"🆔 Detected chat_id: {self.chat_id}")
+                            break
     
     def _setup_event_listeners(self):
         """Set up basic event listeners"""
@@ -252,7 +271,7 @@ class NetworkMonitor:
         # Set up event listeners for network traffic
         self.client.on("Network.requestWillBeSent", self._handle_request_sent)
         self.client.on("Network.responseReceived", self._handle_response_received)
-        # self.client.on("Network.loadingFinished", self._handle_response_finished)
+        self.client.on("Network.loadingFinished", self._handle_response_finished)
         
         # Enable Fetch domain to intercept responses for better SSE handling
         await self.client.send("Fetch.enable", {
@@ -638,6 +657,16 @@ class NetworkMonitor:
     async def _capture_content_response(self, request_id, url):
         """Capture and save content responses from v0.dev"""
         try:
+            # Print the chat_id if we have one
+            if self.chat_id:
+                print(f"🆔 _capture_content_response: Current chat_id is {self.chat_id}")
+                
+                # Check if this URL contains our chat_id
+                if self.chat_id in url:
+                    print(f"✓ URL contains the chat_id: {self.chat_id}")
+                else:
+                    print(f"✗ URL does not contain the chat_id: {self.chat_id}")
+            
             # Get the response body using CDP
             result = await self.client.send("Network.getResponseBody", {"requestId": request_id})
             
@@ -656,33 +685,44 @@ class NetworkMonitor:
             
             # Extract a meaningful name from the URL
             url_parts = url.split('/')
-            print(f"URL parts: {url_parts}")
+            print(f"url_parts: {url_parts}")
             file_name = None
+            
+            # Skip if URL contains community or projects
+            if 'community' in url_parts or 'projects' in url_parts:
+                print(f"ℹ️ _capture_content_response: URL contains community/projects, skipping: {url}")
+                return
             
             # Look for meaningful segments in the URL
             for part in url_parts:
                 if part.startswith("chat/") and len(part) > 5:
-                    file_name = part.split('?')[0]
+                    file_name = part.split('?')[0]  # Remove query parameters
                     break
             
             if not file_name:
                 # Fallback to the last part of the URL
                 file_name = url_parts[-1].split('?')[0]
+                print(f"ℹlast part of the url: {file_name}")
             
             # Clean up the filename
             file_name = file_name.replace('/', '_').replace('?', '_').replace('=', '_')
+            
+            # Only save if the URL contains "chat"
+            if "chat" in url.lower():
+                # Save the response
+                filename = f"{self.capture_dir}/{file_name}_{timestamp}.txt"
+                
+                with open(filename, "w") as f:
+                    f.write(body_text)
+                
+                print(f"💾 _capture_content_response: Saved response to: {filename}")
+                self.saved_files.append(filename)
 
-            # Save the response
-            filename = f"{self.capture_dir}/{file_name}_{timestamp}.txt"
-            print(f"File name: {file_name}")
-            
-            with open(filename, "w") as f:
-                f.write(body_text)
-            
-            self.saved_files.append(filename)
+            else:
+                print(f"ℹ️ _capture_content_response: URL doesn't contain 'chat', not saving files")
                 
         except Exception as e:
-            pass
+            print(f"❌ _capture_content_response: Error capturing content: {e}")
     
     def _handle_response_finished(self, event):
         """Handle response body finished loading events using CDP"""
@@ -709,9 +749,8 @@ class NetworkMonitor:
             return
             
         # Create a task to get and save the response body
-        # task = asyncio.create_task(self._get_and_save_response_body(request_id, url))
-        # self.pending_tasks.append(task)
-        pass
+        task = asyncio.create_task(self._get_and_save_response_body(request_id, url))
+        self.pending_tasks.append(task)
     
     async def _get_and_save_response_body(self, request_id, url):
         """Get response body and save it to file"""
@@ -924,6 +963,10 @@ class NetworkMonitor:
         # Allow some time for the UI to register the text
         await asyncio.sleep(wait_time)
         
+        # Reset the chat_id before submitting
+        self.chat_id = None
+        print("Resetting chat_id before submission")
+        
         # Try multiple methods to submit the prompt
         print("Submitting prompt...")
         
@@ -977,6 +1020,13 @@ class NetworkMonitor:
         self.prompt_submitted = True
         
         print("Monitoring for responses...")
+        
+        # Wait a short time to see if we get a URL change
+        try:
+            print("Waiting for URL change to detect chat_id...")
+            # We don't need to block here - the navigation handler will catch the URL change
+        except Exception as e:
+            print(f"Error waiting for URL change: {e}")
     
     async def await_pending_tasks(self):
         """Wait for all pending tasks to complete"""
