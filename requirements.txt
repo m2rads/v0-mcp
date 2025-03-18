@@ -2,3 +2,4 @@ playwright>=1.40.0
 asyncio>=3.4.3
 typing-extensions>=4.0.0
 json5>=0.9.10 
+mcp[cli]
