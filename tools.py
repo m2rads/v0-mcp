@@ -666,6 +666,7 @@ class NetworkMonitor:
                     print(f"✓ URL contains the chat_id: {self.chat_id}")
                 else:
                     print(f"✗ URL does not contain the chat_id: {self.chat_id}")
+                    return
             
             # Get the response body using CDP
             result = await self.client.send("Network.getResponseBody", {"requestId": request_id})
@@ -749,13 +750,13 @@ class NetworkMonitor:
             return
             
         # Create a task to get and save the response body
-        task = asyncio.create_task(self._get_and_save_response_body(request_id, url))
-        self.pending_tasks.append(task)
-    
+        # task = asyncio.create_task(self._get_and_save_response_body(request_id, url))
+        # self.pending_tasks.append(task)
+        return
+        
     async def _get_and_save_response_body(self, request_id, url):
         """Get response body and save it to file"""
         try:
-            print(f"🔍 _get_and_save_response_body: Processing response from URL: {url}")
             # Get the response body using CDP
             result = await self.client.send("Network.getResponseBody", {"requestId": request_id})
             
@@ -778,25 +779,21 @@ class NetworkMonitor:
             # Only save if url_part is "chat"
             if url_part.lower() == "chat":
                 filename = f"{self.capture_dir}/{url_part}_{timestamp}"
-                print(f"ℹ️ _get_and_save_response_body: Base filename will be: {filename}")
                 
                 # For SSE streams, try to parse them
                 if "text/event-stream" in content_type:
-                    print(f"ℹ️ _get_and_save_response_body: Detected SSE stream")
                     events = self._parse_sse_stream(body_bytes)
                     if events:
                         json_filename = f"{filename}_sse.jsonl"
                         with open(json_filename, "w") as f:
                             for event in events:
                                 f.write(json.dumps(event) + "\n")
-                        print(f"💾 _get_and_save_response_body: Saved parsed SSE events to: {json_filename}")
                         self.saved_files.append(json_filename)
                         
                         # Also save the raw data
                         raw_filename = f"{filename}_sse.raw"
                         with open(raw_filename, "wb") as f:
                             f.write(body_bytes)
-                        print(f"💾 _get_and_save_response_body: Saved raw SSE data to: {raw_filename}")
                         self.saved_files.append(raw_filename)
                         
                         # Add to our vercel responses collection
@@ -816,14 +813,12 @@ class NetworkMonitor:
                         json_filename = f"{filename}.json"
                         with open(json_filename, "w") as f:
                             json.dump(json_data, f, indent=2)
-                        print(f"💾 _get_and_save_response_body: Saved JSON response to: {json_filename}")
                         self.saved_files.append(json_filename)
                     except Exception as e:
                         # Save as raw if JSON parsing fails
                         text_filename = f"{filename}.txt"
                         with open(text_filename, "wb") as f:
                             f.write(body_bytes)
-                        print(f"💾 _get_and_save_response_body: Saved text response to: {text_filename}")
                         self.saved_files.append(text_filename)
                 else:
                     # Save as binary or text based on content
@@ -831,7 +826,6 @@ class NetworkMonitor:
                         bin_filename = f"{filename}.bin"
                         with open(bin_filename, "wb") as f:
                             f.write(body_bytes)
-                        print(f"💾 _get_and_save_response_body: Saved binary response to: {bin_filename}")
                         self.saved_files.append(bin_filename)
                         
                         # Also try to decode as text
@@ -840,7 +834,6 @@ class NetworkMonitor:
                             decoded_filename = f"{filename}_decoded.txt"
                             with open(decoded_filename, "w") as f:
                                 f.write(decoded)
-                            print(f"💾 _get_and_save_response_body: Saved decoded binary to: {decoded_filename}")
                             self.saved_files.append(decoded_filename)
                         except:
                             print(f"ℹ️ _get_and_save_response_body: Could not decode binary as text")
@@ -849,7 +842,6 @@ class NetworkMonitor:
                         text_filename = f"{filename}.txt"
                         with open(text_filename, "wb") as f:
                             f.write(body_bytes)
-                        print(f"💾 _get_and_save_response_body: Saved text response to: {text_filename}")
                         self.saved_files.append(text_filename)
             else:
                 print(f"ℹ️ _get_and_save_response_body: URL part '{url_part}' is not 'chat', not saving files")
@@ -875,7 +867,6 @@ class NetworkMonitor:
                     json_data = json.loads(post_data)
                     with open(filename, "w") as f:
                         json.dump(json_data, f, indent=2)
-                    print(f"💾 _save_request_payload: Saved request payload as JSON to: {filename}")
                     self.saved_files.append(filename)
                     
                     # Print prompt if found and in debug mode
@@ -885,7 +876,6 @@ class NetworkMonitor:
                     # Save as plain text
                     with open(filename, "w") as f:
                         f.write(post_data)
-                    print(f"💾 _save_request_payload: Saved request payload as text to: {filename}")
                     self.saved_files.append(filename)
             else:
                 print(f"ℹ️ _save_request_payload: URL doesn't contain 'chat', not saving files")
@@ -930,7 +920,6 @@ class NetworkMonitor:
             try:
                 with open(filename, "w") as f:
                     f.write(message)
-                print(f"💾 _log_websocket_message: Saved WebSocket message to: {filename}")
                 self.saved_files.append(filename)
                 
                 # Try to parse as JSON
@@ -939,7 +928,6 @@ class NetworkMonitor:
                     json_filename = f"{self.capture_dir}/ws_{url_part}_{timestamp}.json"
                     with open(json_filename, "w") as f:
                         json.dump(json_data, f, indent=2)
-                    print(f"💾 _log_websocket_message: Saved parsed WebSocket JSON to: {json_filename}")
                     self.saved_files.append(json_filename)
                 except:
                     print(f"ℹ️ _log_websocket_message: Message is not valid JSON, only saved as text")
