@@ -81,6 +81,19 @@ class NetworkMonitor:
         # Create a new page with modified request/response handlers
         self.page = await self.browser.new_page()
         
+        # Store the original context for later reference
+        self.original_context = self.page.context
+        
+        # Add event listener to page for focus changes
+        await self.page.evaluate("""() => {
+            window.addEventListener('blur', () => {
+                console.log('MONITOR_TAB_LOST_FOCUS');
+            });
+            window.addEventListener('focus', () => {
+                console.log('MONITOR_TAB_GAINED_FOCUS');
+            });
+        }""")
+        
         # Set up event listeners for the page
         await self._setup_page_listeners()
         
@@ -224,6 +237,10 @@ class NetworkMonitor:
                 # Try to extract the URL and data
                 if self.debug:
                     print(f"Console message: {text}")
+            elif "MONITOR_TAB_LOST_FOCUS" in text:
+                print("⚠️ Monitored tab lost focus - monitoring will continue")
+            elif "MONITOR_TAB_GAINED_FOCUS" in text:
+                print("✅ Monitored tab gained focus")
         except Exception as e:
             if self.debug:
                 print(f"Error handling console message: {e}")
@@ -280,6 +297,9 @@ class NetworkMonitor:
         
         # Set up handler for Fetch events
         self.client.on("Fetch.requestPaused", self._handle_fetch_request)
+        
+        # Set page as target so events from this page will be processed even when not in focus
+        await self.client.send("Page.enable")
         
         if self.debug:
             print("Network interception enabled")
@@ -1022,7 +1042,11 @@ async def monitor_v0_interactions(prompt):
         headless=False,
         debug=False,
         disable_security=True,
-        extra_args=["--disable-web-security", "--enable-logging"]  # Allow cross-origin requests and enable more logging
+        extra_args=[
+            "--disable-web-security", 
+            "--enable-logging",
+            "--process-per-tab"  # Use separate processes for tabs to maintain monitoring
+        ]
     )
     
     # Initialize browser and monitor
@@ -1033,6 +1057,9 @@ async def monitor_v0_interactions(prompt):
         # Set up page and monitoring
         await monitor.setup()
         
+        # Make the monitoring more resilient to tab switching
+        print("✨ Tab monitoring active - you can now safely switch to other tabs")
+        
         # Submit the prompt and wait for responses
         await monitor.submit_prompt(prompt)
         
@@ -1042,6 +1069,16 @@ async def monitor_v0_interactions(prompt):
         try:
             while True:
                 await asyncio.sleep(1)
+                # Ensure the CDP session is still attached to our page
+                if monitor.client and monitor.page:
+                    try:
+                        # Ping the client to ensure it's still connected
+                        await monitor.client.send("Runtime.evaluate", {"expression": "1"})
+                    except Exception as e:
+                        print("⚠️ Lost connection to monitored tab, reconnecting...")
+                        # Reconnect the CDP session
+                        monitor.client = await monitor.page.context.new_cdp_session(monitor.page)
+                        await monitor._setup_network_interception()
         except KeyboardInterrupt:
             print("\nMonitoring stopped.")
         
