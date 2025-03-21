@@ -722,7 +722,8 @@ class NetworkMonitor:
                 filename = f"{self.capture_dir}/{file_name}_{timestamp}.txt"
 
                 # Check for pattern: name-with-dashes-chatid_timestamp
-                if not re.search(r'[-\w]+-\w+_\d+', filename):
+                pattern = f'-{self.chat_id}_'
+                if not re.search(pattern, filename):
                     print(f"filename does not match expected pattern: {filename} - not saving response")
                     return
                 
