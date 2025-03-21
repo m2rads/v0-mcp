@@ -732,12 +732,142 @@ class NetworkMonitor:
                 
                 print(f"💾 _capture_content_response: Saved response to: {filename}")
                 self.saved_files.append(filename)
-
+                
+                # Also save a cleaned version with only the code
+                clean_text = self._clean_response_text(body_text)
+                if clean_text:
+                    clean_filename = f"{self.capture_dir}/{file_name}_clean_{timestamp}.txt"
+                    with open(clean_filename, "w") as f:
+                        f.write(clean_text)
+                    
+                    print(f"💾 _capture_content_response: Saved cleaned response to: {clean_filename}")
+                    self.saved_files.append(clean_filename)
             else:
                 print(f"ℹ️ _capture_content_response: URL doesn't contain 'chat', not saving files")
                 
         except Exception as e:
             print(f"❌ _capture_content_response: Error capturing content: {e}")
+            
+    def _clean_response_text(self, text):
+        """Clean the response text to extract only the code sections"""
+        try:
+            # Look for all V0_FILE sections
+            v0_file_pattern = r'(\w+:T\w+,\[V0_FILE\][^"]+".+?")'
+            v0_sections = list(re.finditer(v0_file_pattern, text))
+            
+            if not v0_sections:
+                print("⚠️ _clean_response_text: No V0_FILE sections found in text")
+                return None
+                
+            print(f"📋 _clean_response_text: Found {len(v0_sections)} V0_FILE sections")
+            
+            # Process each section to extract clean code
+            clean_sections = []
+            unique_files = {}  # Dictionary to track unique filenames
+            
+            for i, section_match in enumerate(v0_sections):
+                section_start = section_match.start()
+                section_marker = section_match.group(0)
+                
+                # Extract the file path for deduplication
+                file_path_match = re.search(r'\[V0_FILE\][^"]+file="([^"]+)"', section_marker)
+                if not file_path_match:
+                    continue
+                file_path = file_path_match.group(1)
+                
+                # Skip if this file has already been processed
+                if file_path in unique_files:
+                    print(f"🔄 _clean_response_text: Skipping duplicate file: {file_path}")
+                    continue
+                
+                # Mark this file as processed
+                unique_files[file_path] = True
+                
+                # Determine where this section ends
+                if i < len(v0_sections) - 1:
+                    next_section_start = v0_sections[i+1].start()
+                    section_text = text[section_start:next_section_start]
+                else:
+                    # For the last section, go to the end of the text
+                    section_text = text[section_start:]
+                
+                # Split into lines for processing
+                lines = section_text.split('\n')
+                
+                # The first line contains the V0_FILE marker
+                clean_lines = [lines[0]]
+                
+                # Start actual code from the line after the marker
+                code_lines = []
+                for j in range(1, len(lines)):
+                    line = lines[j]
+                    
+                    # Check if this line looks like metadata (e.g., "19:[["b_RRDRw9zzXnD",false]]")
+                    if re.match(r'^\d+:\[\["[^"]+",', line):
+                        continue
+                        
+                    # Check for cursor position marker
+                    if '<CURRENT_CURSOR_POSITION>' in line:
+                        continue
+                        
+                    # Check for other non-code patterns
+                    if re.match(r'^\w+:\[\[', line):
+                        continue
+                    
+                    code_lines.append(line)
+                
+                # Find the last meaningful line of code (usually with closing bracket)
+                last_code_line = -1
+                for j in range(len(code_lines) - 1, -1, -1):
+                    line = code_lines[j].strip()
+                    if line and (line.endswith('}') or line.endswith(')') or line.endswith('>')):
+                        last_code_line = j
+                        break
+                
+                # If we found a valid end, only keep code up to that point
+                if last_code_line >= 0:
+                    clean_lines.extend(code_lines[:last_code_line + 1])
+                else:
+                    # If no clear end found, keep all non-empty lines
+                    clean_lines.extend([l for l in code_lines if l.strip()])
+                
+                clean_sections.append('\n'.join(clean_lines))
+            
+            # Combine all clean sections
+            clean_text = '\n\n'.join(clean_sections)
+            
+            # Verify that we have code sections
+            if "[V0_FILE]" not in clean_text:
+                print("⚠️ _clean_response_text: Extracted text doesn't contain V0_FILE markers, using original text")
+                return None
+                
+            # Also create individual files for each code section
+            for i, section_text in enumerate(clean_sections):
+                # Extract the file path from the V0_FILE marker
+                file_path_match = re.search(r'\[V0_FILE\][^"]+file="([^"]+)"', section_text)
+                if file_path_match:
+                    file_path = file_path_match.group(1)
+                    
+                    # Extract only the code part (everything after the first line)
+                    code_lines = section_text.split('\n')[1:]
+                    
+                    # Create a clean filename for this specific section
+                    timestamp = int(time.time())
+                    clean_filename = f"{self.capture_dir}/file_{file_path.replace('/', '_')}_{timestamp}.txt"
+                    
+                    with open(clean_filename, "w") as f:
+                        f.write('\n'.join(code_lines))
+                    
+                    print(f"💾 _clean_response_text: Saved individual file to: {clean_filename}")
+                    self.saved_files.append(clean_filename)
+            
+            return clean_text
+            
+        except Exception as e:
+            print(f"❌ _clean_response_text: Error cleaning response text: {e}")
+            if self.debug:
+                traceback.print_exc()
+            return None
     
     def _handle_response_finished(self, event):
         """Handle response body finished loading events using CDP"""
