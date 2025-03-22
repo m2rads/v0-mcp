@@ -1,6 +1,6 @@
 import asyncio
 from browser import Browser, BrowserConfig
-from tools import monitor_v0_interactions
+from tools import monitor_v0_interactions, monitor_v0_interactions_and_return_content
 
 async def main():
     """Main function that gets a prompt from the user and monitors v0.dev interactions"""
@@ -17,8 +17,18 @@ async def main():
     print("-" * 30)
     print("Starting monitoring...")
     
-    # Run the monitoring with the user's prompt
-    await monitor_v0_interactions(prompt)
+    # Run the monitoring with the user's prompt and get the clean text content
+    clean_text = await monitor_v0_interactions_and_return_content(prompt)
+    
+    # Print and/or use the clean text content
+    if clean_text:
+        print("-" * 30)
+        print("Clean text content:")
+        print("-" * 30)
+        print(clean_text)
+        print("-" * 30)
+    else:
+        print("No clean text content returned")
 
 if __name__ == "__main__":
     try:

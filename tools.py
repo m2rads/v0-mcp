@@ -712,7 +712,7 @@ class NetworkMonitor:
             if not file_name:
                 # Fallback to the last part of the URL
                 file_name = url_parts[-1].split('?')[0]
-                print(f"ℹlast part of the url: {file_name}")
+                print(f"ℹ️ last part of the url: {file_name}")
             
             # Clean up the filename
             file_name = file_name.replace('/', '_').replace('?', '_').replace('=', '_')
@@ -816,20 +816,49 @@ class NetworkMonitor:
                     
                     code_lines.append(line)
                 
-                # Find the last meaningful line of code (usually with closing bracket)
-                last_code_line = -1
-                for j in range(len(code_lines) - 1, -1, -1):
-                    line = code_lines[j].strip()
-                    if line and (line.endswith('}') or line.endswith(')') or line.endswith('>')):
-                        last_code_line = j
-                        break
+                # MODIFIED: Instead of trying to find the "last meaningful line",
+                # we'll use a different approach to handle trailing content better
                 
-                # If we found a valid end, only keep code up to that point
-                if last_code_line >= 0:
-                    clean_lines.extend(code_lines[:last_code_line + 1])
-                else:
-                    # If no clear end found, keep all non-empty lines
-                    clean_lines.extend([l for l in code_lines if l.strip()])
+                # First, keep all non-empty lines by default
+                filtered_code_lines = []
+                
+                # Check if we're dealing with a file that might have SVG or JSON content
+                is_svg_or_json = file_path.endswith('.svg') or file_path.endswith('.json') or '.tsx' in file_path or '.jsx' in file_path
+                
+                # Track nesting level for brackets to better handle complex structures
+                nesting_level = 0
+                in_special_content = False
+                
+                for line in code_lines:
+                    # Count opening and closing brackets/tags to track nesting
+                    if is_svg_or_json:
+                        # For SVG/JSX files, we need to track tag and brace nesting
+                        opens = line.count('<') + line.count('{')
+                        closes = line.count('>') + line.count('}')
+                        
+                        # Detect if we're in a special content block (like SVG or JSON)
+                        if '<svg' in line or '={[' in line or '= {' in line:
+                            in_special_content = True
+                        
+                        # Once we're in special content, be more careful about what we exclude
+                        if in_special_content:
+                            filtered_code_lines.append(line)
+                            continue
+                        
+                        nesting_level += opens - closes
+                    
+                    # Skip lines that are clearly non-code metadata
+                    if re.match(r'^f:\[\["', line) or re.match(r'^[\d]+:\[\[', line):
+                        # But only if we're not in a nested structure
+                        if nesting_level <= 0 and not in_special_content:
+                            break
+                    
+                    # Add the line to our filtered list if it's not empty or is part of a nested structure
+                    if line.strip() or nesting_level > 0 or in_special_content:
+                        filtered_code_lines.append(line)
+                
+                # Add all the filtered code lines
+                clean_lines.extend(filtered_code_lines)
                 
                 clean_sections.append('\n'.join(clean_lines))
             
@@ -1226,10 +1255,172 @@ async def monitor_v0_interactions(prompt):
         # await browser.close()
         pass
 
-if __name__ == "__main__":
-    """    
-    Usage:
-        python tools.py
-    """
-   
-    asyncio.run(monitor_v0_interactions()) 
+async def monitor_v0_interactions_and_return_content(prompt):
+    """Modified version of monitor_v0_interactions that returns the clean text instead of saving to file"""
+    # Configure browser
+    config = BrowserConfig(
+        headless=False,
+        debug=False,
+        disable_security=True,
+        extra_args=[
+            "--disable-web-security", 
+            "--enable-logging",
+            "--process-per-tab"  # Use separate processes for tabs to maintain monitoring
+        ]
+    )
+    
+    # Initialize browser and monitor with custom class
+    browser = Browser(config)
+    monitor = ContentReturningMonitor(browser, debug=False)  # Use the modified monitor class
+    
+    try:
+        # Set up page and monitoring
+        await monitor.setup()
+        
+        # Make the monitoring more resilient to tab switching
+        print("✨ Tab monitoring active - you can now safely switch to other tabs")
+        
+        # Submit the prompt and wait for responses
+        await monitor.submit_prompt(prompt)
+        
+        print("Monitoring network traffic. Press Ctrl+C to stop.")
+        
+        # Wait until we get content or timeout
+        max_wait_time = 300  # Maximum wait time in seconds
+        wait_start = time.time()
+        
+        try:
+            while True:
+                # Return clean_text once we have it
+                if monitor.clean_text_content:
+                    return monitor.clean_text_content
+                
+                # Check if we've waited too long
+                if time.time() - wait_start > max_wait_time:
+                    print("Reached maximum wait time, returning any content available")
+                    return monitor.clean_text_content or "No content captured within timeout period"
+                
+                await asyncio.sleep(1)
+                # Ensure the CDP session is still attached to our page
+                if monitor.client and monitor.page:
+                    try:
+                        # Ping the client to ensure it's still connected
+                        await monitor.client.send("Runtime.evaluate", {"expression": "1"})
+                    except Exception as e:
+                        print("⚠️ Lost connection to monitored tab, reconnecting...")
+                        # Reconnect the CDP session
+                        monitor.client = await monitor.page.context.new_cdp_session(monitor.page)
+                        await monitor._setup_network_interception()
+        except KeyboardInterrupt:
+            print("\nMonitoring stopped.")
+        
+        # Process pending tasks
+        await monitor.await_pending_tasks()
+        
+        # Return the captured content or a default message
+        return monitor.clean_text_content or "No content captured before stopping"
+            
+    except Exception as e:
+        print(f"Error: {e}")
+        return f"Error occurred: {e}"
+    finally:
+        # Clean up resources
+        # await browser.close()
+        pass
+
+class ContentReturningMonitor(NetworkMonitor):
+    """Modified NetworkMonitor that stores clean_text_content for retrieval"""
+    
+    def __init__(self, browser, debug=False):
+        """Initialize with a property to store clean text content"""
+        super().__init__(browser, debug)
+        self.clean_text_content = None
+    
+    async def _capture_and_return_content_response(self, request_id, url):
+        """Modified version that captures content and stores it for return instead of just saving to file"""
+        try:
+            # Get the response body using CDP
+            result = await self.client.send("Network.getResponseBody", {"requestId": request_id})
+            
+            body = result.get("body", "")
+            base64_encoded = result.get("base64Encoded", False)
+            
+            # Decode base64 if needed
+            if base64_encoded and body:
+                body_bytes = base64.b64decode(body)
+                body_text = body_bytes.decode('utf-8', errors='ignore')
+            else:
+                body_text = body
+            
+            # Create a unique filename based on the URL
+            timestamp = int(time.time())
+            
+            # Extract a meaningful name from the URL
+            url_parts = url.split('/')
+            print(f"url_parts: {url_parts}")
+            file_name = None
+            
+            # Skip if URL contains community or projects
+            if 'community' in url_parts or 'projects' in url_parts:
+                print(f"ℹ️ _capture_and_return_content_response: URL contains community/projects, skipping: {url}")
+                return
+            
+            # Look for meaningful segments in the URL
+            for part in url_parts:
+                if part.startswith("chat/") and len(part) > 5:
+                    file_name = part.split('?')[0]  # Remove query parameters
+                    break
+            
+            if not file_name:
+                # Fallback to the last part of the URL
+                file_name = url_parts[-1].split('?')[0]
+                print(f"ℹ️ last part of the url: {file_name}")
+            
+            # Clean up the filename
+            file_name = file_name.replace('/', '_').replace('?', '_').replace('=', '_')
+            
+            # Only process if the URL contains "chat"
+            if "chat" in url.lower():
+                # Generate the full filename just for pattern matching
+                filename = f"{self.capture_dir}/{file_name}_{timestamp}.txt"
+                
+                # Check for pattern in the full filename - exactly as in the original method
+                pattern = f'-{self.chat_id}_'
+                if not re.search(pattern, filename):
+                    # Skip pattern check - we don't want to return early here
+                    # This is the key fix - the original method was checking the pattern in the full filename
+                    # but we'll proceed anyway to catch all content
+                    print(f"⚠️ Pattern not found but processing anyway: {filename}")
+                
+                print(f"📝 _capture_and_return_content_response: Processing content from: {url}")
+                
+                # Get cleaned version with only the code
+                clean_text = self._clean_response_text(body_text)
+                if clean_text:
+                    # Store the clean text for later retrieval
+                    self.clean_text_content = clean_text
+                    print(f"✅ _capture_and_return_content_response: Clean text content stored for retrieval ({len(clean_text)} chars)")
+            else:
+                print(f"ℹ️ _capture_and_return_content_response: URL doesn't contain 'chat', not processing")
+                
+        except Exception as e:
+            print(f"❌ _capture_and_return_content_response: Error capturing content: {e}")
+    
+    # Override the handle_response_received method to capture content directly
+    def _handle_response_received(self, event):
+        """Handle response headers received events using CDP"""
+        # Call the original method first
+        super()._handle_response_received(event)
+        
+        # Add our custom processing for all responses
+        if self.prompt_submitted:
+            request_id = event.get("requestId")
+            response = event.get("response", {})
+            url = response.get("url")
+            
+            # Look for potential v0.dev content in all responses after prompt submission
+            if "v0.dev/chat/" in url:
+                print(f"🔍 Custom monitor checking URL: {url}")
+                # Create a task to capture this response
+                task = asyncio.create_task(self._capture_and_return_content_response(request_id, url))
+                self.pending_tasks.append(task)
