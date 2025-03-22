@@ -1,6 +1,16 @@
 import asyncio
 from browser import Browser, BrowserConfig
-from tools import monitor_v0_interactions, monitor_v0_interactions_and_return_content
+from tools import monitor_v0_interactions_and_return_content
+from mcp.server.fastmcp import FastMCP
+
+# Initialize MCP Server 
+mcp = FastMCP("v0")
+
+@mcp.tool()
+async def monitor_v0_interactions(prompt: str):
+    """Monitor v0.dev interactions and return the AI generated content"""
+    return await monitor_v0_interactions_and_return_content(prompt)
+
 
 async def main():
     """Main function that gets a prompt from the user and monitors v0.dev interactions"""
@@ -32,7 +42,7 @@ async def main():
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        mcp.run(transport='stdio')
     except KeyboardInterrupt:
         print("\nMonitoring stopped.")
     except Exception as e:
