@@ -763,6 +763,7 @@ class NetworkMonitor:
             
             # Process each section to extract clean code
             clean_sections = []
+            mdx_sections = []  # New array to store MDX formatted sections
             unique_files = {}  # Dictionary to track unique filenames
             
             for i, section_match in enumerate(v0_sections):
@@ -796,6 +797,10 @@ class NetworkMonitor:
                 
                 # The first line contains the V0_FILE marker
                 clean_lines = [lines[0]]
+                
+                # Extract language type from marker for MDX format
+                language_match = re.search(r'\[V0_FILE\](\w+):file="', section_marker)
+                language_type = language_match.group(1) if language_match else "text"
                 
                 # Start actual code from the line after the marker
                 code_lines = []
@@ -860,17 +865,35 @@ class NetworkMonitor:
                 # Add all the filtered code lines
                 clean_lines.extend(filtered_code_lines)
                 
+                # Create traditional clean text section
                 clean_sections.append('\n'.join(clean_lines))
+                
+                # Create Cursor-style formatted section - THIS IS THE KEY CHANGE
+                code_block = '\n'.join(filtered_code_lines)
+                mdx_section = f"```{language_type}:{file_path}\n{code_block}\n```"
+                mdx_sections.append(mdx_section)
             
-            # Combine all clean sections
+            # Combine all clean sections (original format)
             clean_text = '\n\n'.join(clean_sections)
+            
+            # Combine all MDX sections (new format)
+            mdx_text = '\n\n'.join(mdx_sections)
             
             # Verify that we have code sections
             if "[V0_FILE]" not in clean_text:
                 print("⚠️ _clean_response_text: Extracted text doesn't contain V0_FILE markers, using original text")
                 return None
                 
-            # Also create individual files for each code section
+            # Save MDX formatted output
+            timestamp = int(time.time())
+            mdx_filename = f"{self.capture_dir}/cursor_formatted_{timestamp}.md"
+            with open(mdx_filename, "w") as f:
+                f.write(mdx_text)
+            
+            print(f"💾 _clean_response_text: Saved Cursor-style formatted output to: {mdx_filename}")
+            self.saved_files.append(mdx_filename)
+            
+            # Also create individual files for each code section (original functionality)
             for i, section_text in enumerate(clean_sections):
                 # Extract the file path from the V0_FILE marker
                 file_path_match = re.search(r'\[V0_FILE\][^"]+file="([^"]+)"', section_text)
