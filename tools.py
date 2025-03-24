@@ -35,6 +35,10 @@ def parse_sse_chunk(chunk: str) -> List[Dict[str, Any]]:
     
     return events
 
+# Global variables to store persistent browser and monitor instances
+_persistent_browser = None
+_persistent_monitor = None
+
 class NetworkMonitor:
     """Monitor and capture network traffic for v0.dev interactions"""
     
@@ -944,8 +948,8 @@ class NetworkMonitor:
             # Save MDX formatted output
             timestamp = int(time.time())
             mdx_filename = f"{self.capture_dir}/cursor_formatted_{timestamp}.md"
-            # with open(mdx_filename, "w") as f:
-            #     f.write(mdx_text)
+            with open(mdx_filename, "w") as f:
+                f.write(mdx_text)
             
             print(f"💾 _clean_response_text: Saved Cursor-style formatted output to: {mdx_filename} with {len(mdx_sections)} files")
             # self.saved_files.append(mdx_filename)
@@ -1203,9 +1207,12 @@ class NetworkMonitor:
         # Allow some time for the UI to register the text
         await asyncio.sleep(wait_time)
         
-        # Reset the chat_id before submitting
-        self.chat_id = None
-        print("Resetting chat_id before submission")
+        # Note: chat_id reset is now handled in monitor_v0_interactions_and_return_content
+        # based on the new_chat parameter, so we don't reset it here
+        if self.chat_id:
+            print(f"Using existing chat_id: {self.chat_id}")
+        else:
+            print("No chat_id yet, will detect from navigation")
         
         # Try multiple methods to submit the prompt
         print("Submitting prompt...")
@@ -1334,30 +1341,47 @@ async def monitor_v0_interactions(prompt):
         # await browser.close()
         pass
 
-async def monitor_v0_interactions_and_return_content(prompt):
-    """Modified version of monitor_v0_interactions that returns the clean text instead of saving to file"""
-    # Configure browser
-    config = BrowserConfig(
-        headless=False,
-        debug=False,
-        disable_security=True,
-        extra_args=[
-            "--disable-web-security", 
-            "--enable-logging",
-            "--process-per-tab"  # Use separate processes for tabs to maintain monitoring
-        ]
-    )
+async def monitor_v0_interactions_and_return_content(prompt, new_chat=True):
+    """Modified version of monitor_v0_interactions that returns the clean text instead of saving to file
     
-    # Initialize browser and monitor with custom class
-    browser = Browser(config)
-    monitor = ContentReturningMonitor(browser, debug=False)  # Use the modified monitor class
+    Args:
+        prompt: The prompt to send to v0.dev
+        new_chat: Whether to start a new chat (True) or continue the existing one (False)
+    """
+    global _persistent_browser, _persistent_monitor
+    
+    # Configure browser only if we need a new session or don't have one yet
+    if new_chat or _persistent_browser is None or _persistent_monitor is None:
+        config = BrowserConfig(
+            headless=False,
+            debug=False,
+            disable_security=True,
+            extra_args=[
+                "--disable-web-security", 
+                "--enable-logging",
+                "--process-per-tab"  # Use separate processes for tabs to maintain monitoring
+            ]
+        )
+        
+        # Initialize browser and monitor with custom class
+        _persistent_browser = Browser(config)
+        _persistent_monitor = ContentReturningMonitor(_persistent_browser, debug=False)
+        
+        # Set up page and monitoring
+        await _persistent_monitor.setup()
+        print("✨ Tab monitoring active - you can now safely switch to other tabs")
+    else:
+        print("🔄 Reusing existing browser session and chat")
+    
+    monitor = _persistent_monitor  # Use shorter name for convenience
     
     try:
-        # Set up page and monitoring
-        await monitor.setup()
-        
-        # Make the monitoring more resilient to tab switching
-        print("✨ Tab monitoring active - you can now safely switch to other tabs")
+        # Only reset chat_id if starting a new chat
+        if new_chat:
+            monitor.chat_id = None
+            print("🆕 Starting new chat (chat_id will be reset)")
+        else:
+            print(f"🔄 Continuing existing chat (chat_id: {monitor.chat_id or 'not yet established'})")
         
         # Submit the prompt and wait for responses
         await monitor.submit_prompt(prompt)
@@ -1402,10 +1426,7 @@ async def monitor_v0_interactions_and_return_content(prompt):
     except Exception as e:
         print(f"Error: {e}")
         return f"Error occurred: {e}"
-    finally:
-        # Clean up resources
-        # await browser.close()
-        pass
+    # Note: No browser.close() call here as we want to keep the browser open
 
 class ContentReturningMonitor(NetworkMonitor):
     """Modified NetworkMonitor that stores clean_text_content for retrieval"""
@@ -1414,6 +1435,13 @@ class ContentReturningMonitor(NetworkMonitor):
         """Initialize with a property to store clean text content"""
         super().__init__(browser, debug)
         self.clean_text_content = None
+    
+    async def submit_prompt(self, prompt: str, wait_time: float = 2.0):
+        """Override to reset clean_text_content before submitting a new prompt"""
+        # Reset clean_text_content for the new prompt
+        self.clean_text_content = None
+        # Call the parent method
+        await super().submit_prompt(prompt, wait_time)
     
     async def _capture_and_return_content_response(self, request_id, url):
         """Modified version that captures content and stores it for return instead of just saving to file"""

@@ -7,9 +7,14 @@ from mcp.server.fastmcp import FastMCP
 mcp = FastMCP("v0")
 
 @mcp.tool()
-async def monitor_v0_interactions(prompt: str):
-    """Monitor v0.dev interactions and return the AI generated content"""
-    return await monitor_v0_interactions_and_return_content(prompt)
+async def monitor_v0_interactions(prompt: str, new_chat: bool = True):
+    """Monitor v0.dev interactions and return the AI generated content
+    
+    Args:
+        prompt: The prompt to send to v0.dev
+        new_chat: Whether to start a new chat (True) or continue the existing one (False)
+    """
+    return await monitor_v0_interactions_and_return_content(prompt, new_chat)
 
 
 async def main():
