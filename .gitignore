@@ -11,3 +11,4 @@ wheels/
 .env
 
 captures
+test_captures

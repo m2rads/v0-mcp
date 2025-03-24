@@ -47,6 +47,7 @@ class NetworkMonitor:
         self.network_log = []  # Store all network requests
         self.pending_tasks = []  # Keep track of pending async tasks
         self.vercel_ai_responses = []  # Store decoded Vercel AI SDK responses
+        self.chat_id = None  # Store the chat ID extracted from the URL
         
         # Create captures directory if it doesn't exist
         self.capture_dir = "captures"
@@ -61,6 +62,8 @@ class NetworkMonitor:
         
         # Store assembled content from streaming responses
         self.assembled_content = ""
+        
+        print(f"📁 NetworkMonitor initialized. Files will be saved to: {self.capture_dir}/")
         
     def log(self, message):
         """Log debug messages"""
@@ -77,6 +80,19 @@ class NetworkMonitor:
             
         # Create a new page with modified request/response handlers
         self.page = await self.browser.new_page()
+        
+        # Store the original context for later reference
+        self.original_context = self.page.context
+        
+        # Add event listener to page for focus changes
+        await self.page.evaluate("""() => {
+            window.addEventListener('blur', () => {
+                console.log('MONITOR_TAB_LOST_FOCUS');
+            });
+            window.addEventListener('focus', () => {
+                console.log('MONITOR_TAB_GAINED_FOCUS');
+            });
+        }""")
         
         # Set up event listeners for the page
         await self._setup_page_listeners()
@@ -199,6 +215,9 @@ class NetworkMonitor:
             # Set up listener for console messages which may contain our captured data
             self.page.on("console", self._handle_console_message)
             
+            # Set up listener for URL changes
+            self.page.on('framenavigated', self._handle_navigation)
+            
             if self.debug:
                 print("Page event listeners set up")
         except Exception as e:
@@ -218,9 +237,28 @@ class NetworkMonitor:
                 # Try to extract the URL and data
                 if self.debug:
                     print(f"Console message: {text}")
+            elif "MONITOR_TAB_LOST_FOCUS" in text:
+                print("⚠️ Monitored tab lost focus - monitoring will continue")
+            elif "MONITOR_TAB_GAINED_FOCUS" in text:
+                print("✅ Monitored tab gained focus")
         except Exception as e:
             if self.debug:
                 print(f"Error handling console message: {e}")
+    
+    def _handle_navigation(self, frame):
+        """Handle navigation events to detect chat_id changes"""
+        if frame is self.page.main_frame and not self.chat_id:  # Only proceed if chat_id isn't set yet
+            url = frame.url
+            if 'v0.dev/chat/' in url:
+                # Extract chat_id from URL
+                url_parts = url.split('/')
+                for i, part in enumerate(url_parts):
+                    if part == 'chat' and i < len(url_parts) - 1:
+                        potential_chat_id = url_parts[i+1].split('?')[0]  # Remove query parameters
+                        if potential_chat_id and potential_chat_id != 'api':
+                            self.chat_id = potential_chat_id
+                            print(f"🆔 Detected chat_id: {self.chat_id}")
+                            break
     
     def _setup_event_listeners(self):
         """Set up basic event listeners"""
@@ -260,6 +298,9 @@ class NetworkMonitor:
         # Set up handler for Fetch events
         self.client.on("Fetch.requestPaused", self._handle_fetch_request)
         
+        # Set page as target so events from this page will be processed even when not in focus
+        await self.client.send("Page.enable")
+        
         if self.debug:
             print("Network interception enabled")
     
@@ -285,95 +326,105 @@ class NetworkMonitor:
                 
                 # Check if it's an SSE stream
                 if "text/event-stream" in content_type or "text/event-stream" in headers.get("Content-Type", ""):
+                    print(f"🔍 _check_for_sse: Detected SSE stream from URL: {url}")
                     # Start streaming the response
                     try:
                         # Start streaming the response
                         reader = response.body_stream()
                         chunks = []
                         timestamp = int(time.time())
-                        filename = f"{self.capture_dir}/sse_stream_{timestamp}.jsonl"
-                        decoded_filename = f"{self.capture_dir}/sse_decoded_{timestamp}.jsonl"
-                        full_response_filename = f"{self.capture_dir}/full_response_{timestamp}.txt"
                         
-                        # Keep track of partial SSE data across chunks
-                        partial_data = ""
-                        
-                        # Write each chunk to the file as we receive it
-                        with open(filename, "wb") as raw_file, open(decoded_filename, "w") as decoded_file:
-                            try:
-                                while True:
-                                    chunk = await reader.read(1024)
-                                    if not chunk:
-                                        break
-                                    
-                                    # Save the raw chunk
-                                    chunks.append(chunk)
-                                    raw_file.write(chunk)
-                                    
-                                    # Try to decode and parse this chunk
-                                    try:
-                                        chunk_text = chunk.decode('utf-8', errors='ignore')
-                                        
-                                        # Combine with any partial data from previous chunk
-                                        combined_text = partial_data + chunk_text
-                                        
-                                        # If we have incomplete lines, save them for the next chunk
-                                        lines = combined_text.split('\n')
-                                        if not combined_text.endswith('\n'):
-                                            partial_data = lines.pop()
-                                        else:
-                                            partial_data = ""
-                                            
-                                        # Parse the complete lines in this chunk
-                                        events = parse_sse_chunk('\n'.join(lines))
-                                        
-                                        # Write decoded events to file
-                                        for event in events:
-                                            decoded_file.write(json.dumps(event) + "\n")
-                                            decoded_file.flush()  # Ensure data is written immediately
-                                            
-                                            # Store Vercel AI responses for later
-                                            self.vercel_ai_responses.append(event)
-                                            
-                                            # Extract text content if available and update assembled content
-                                            if isinstance(event, dict):
-                                                if "text" in event:
-                                                    self.assembled_content += event["text"]
-                                                elif "raw" in event and isinstance(event["raw"], str):
-                                                    try:
-                                                        # Try to parse raw as JSON
-                                                        raw_json = json.loads(event["raw"])
-                                                        if isinstance(raw_json, dict) and "text" in raw_json:
-                                                            self.assembled_content += raw_json["text"]
-                                                    except:
-                                                        pass
-                                    
-                                    except Exception as e:
-                                        pass
+                        # Only save if the URL contains "chat"
+                        if "chat" in url.lower():
+                            filename = f"{self.capture_dir}/sse_stream_{timestamp}.jsonl"
+                            decoded_filename = f"{self.capture_dir}/sse_decoded_{timestamp}.jsonl"
+                            full_response_filename = f"{self.capture_dir}/full_response_{timestamp}.txt"
                             
-                            except Exception as e:
-                                pass
-                        
-                        self.saved_files.append(filename)
-                        self.saved_files.append(decoded_filename)
-                        
-                        # Process the full stream content
-                        full_data = b"".join(chunks)
-                        events = self._parse_sse_stream(full_data)
-                        
-                        # Save the fully assembled text content
-                        if self.assembled_content:
-                            # Create a clean filename without timestamp for easy access
-                            clean_filename = f"{self.capture_dir}/full_response.txt"
-                            with open(clean_filename, "w") as f:
-                                f.write(self.assembled_content)
-                            if clean_filename not in self.saved_files:
-                                self.saved_files.append(clean_filename)
+                            print(f"💾 _check_for_sse: Will save SSE stream to: {filename}")
+                            print(f"💾 _check_for_sse: Will save decoded events to: {decoded_filename}")
+                            
+                            # Keep track of partial SSE data across chunks
+                            partial_data = ""
+                            
+                            # Write each chunk to the file as we receive it
+                            with open(filename, "wb") as raw_file, open(decoded_filename, "w") as decoded_file:
+                                try:
+                                    while True:
+                                        chunk = await reader.read(1024)
+                                        if not chunk:
+                                            break
+                                        
+                                        # Save the raw chunk
+                                        chunks.append(chunk)
+                                        raw_file.write(chunk)
+                                        
+                                        # Try to decode and parse this chunk
+                                        try:
+                                            chunk_text = chunk.decode('utf-8', errors='ignore')
+                                            
+                                            # Combine with any partial data from previous chunk
+                                            combined_text = partial_data + chunk_text
+                                            
+                                            # If we have incomplete lines, save them for the next chunk
+                                            lines = combined_text.split('\n')
+                                            if not combined_text.endswith('\n'):
+                                                partial_data = lines.pop()
+                                            else:
+                                                partial_data = ""
+                                                
+                                            # Parse the complete lines in this chunk
+                                            events = parse_sse_chunk('\n'.join(lines))
+                                            
+                                            # Write decoded events to file
+                                            for event in events:
+                                                decoded_file.write(json.dumps(event) + "\n")
+                                                decoded_file.flush()  # Ensure data is written immediately
+                                                
+                                                # Store Vercel AI responses for later
+                                                self.vercel_ai_responses.append(event)
+                                                
+                                                # Extract text content if available and update assembled content
+                                                if isinstance(event, dict):
+                                                    if "text" in event:
+                                                        self.assembled_content += event["text"]
+                                                    elif "raw" in event and isinstance(event["raw"], str):
+                                                        try:
+                                                            # Try to parse raw as JSON
+                                                            raw_json = json.loads(event["raw"])
+                                                            if isinstance(raw_json, dict) and "text" in raw_json:
+                                                                self.assembled_content += raw_json["text"]
+                                                        except:
+                                                            pass
+                                        
+                                        except Exception as e:
+                                            pass
+                                
+                                except Exception as e:
+                                    pass
+                            
+                            self.saved_files.append(filename)
+                            self.saved_files.append(decoded_filename)
+                            
+                            # Process the full stream content
+                            full_data = b"".join(chunks)
+                            events = self._parse_sse_stream(full_data)
+                            
+                            # Save the fully assembled text content
+                            if self.assembled_content:
+                                # Create a clean filename without timestamp for easy access
+                                clean_filename = f"{self.capture_dir}/full_response.txt"
+                                with open(clean_filename, "w") as f:
+                                    f.write(self.assembled_content)
+                                print(f"💾 _check_for_sse: Saved assembled content to: {clean_filename}")
+                                if clean_filename not in self.saved_files:
+                                    self.saved_files.append(clean_filename)
+                        else:
+                            print(f"ℹ️ _check_for_sse: URL doesn't contain 'chat', not saving files")
                     
                     except Exception as e:
-                        pass
+                        print(f"❌ _check_for_sse: Error processing SSE stream: {e}")
             except Exception as e:
-                pass
+                print(f"❌ _check_for_sse: Error checking headers: {e}")
     
     def _parse_sse_stream(self, data: Union[bytes, str]) -> List[Dict[str, Any]]:
         """
@@ -397,9 +448,10 @@ class NetworkMonitor:
             # Store raw data for debug
             if self.debug:
                 timestamp = int(time.time())
-                with open(f"{self.capture_dir}/raw_sse_{timestamp}.txt", "w") as f:
+                debug_filename = f"{self.capture_dir}/raw_sse_{timestamp}.txt"
+                with open(debug_filename, "w") as f:
                     f.write(text)
-                print(f"📝 Saved raw SSE data for debugging to raw_sse_{timestamp}.txt")
+                print(f"💾 _parse_sse_stream: Saved raw SSE data for debugging to: {debug_filename}")
             
             # Initialize event collection
             events = []
@@ -506,17 +558,26 @@ class NetworkMonitor:
             # If we have extracted content, save the assembled text
             if assembled_text:
                 self.assembled_content += assembled_text
-                timestamp = int(time.time())
                 
-                # Save to timestamped file
-                with open(f"{self.capture_dir}/assembled_content_{timestamp}.txt", "w") as f:
-                    f.write(self.assembled_content)
-                
-                # Also save to a consistent filename for easy access
-                with open(f"{self.capture_dir}/assembled_content.txt", "w") as f:
-                    f.write(self.assembled_content)
-                
-                print(f"📝 Updated assembled text content (total: {len(self.assembled_content)} chars)")
+                # Only save files if we're processing chat-related content
+                if any("chat" in str(event) for event in events):
+                    timestamp = int(time.time())
+                    
+                    # Save to timestamped file
+                    timestamped_filename = f"{self.capture_dir}/assembled_content_{timestamp}.txt"
+                    with open(timestamped_filename, "w") as f:
+                        f.write(self.assembled_content)
+                    print(f"💾 _parse_sse_stream: Saved timestamped assembled content to: {timestamped_filename}")
+                    
+                    # Also save to a consistent filename for easy access
+                    consistent_filename = f"{self.capture_dir}/assembled_content.txt"
+                    with open(consistent_filename, "w") as f:
+                        f.write(self.assembled_content)
+                    print(f"💾 _parse_sse_stream: Updated consistent assembled content file: {consistent_filename}")
+                    
+                    print(f"📝 Updated assembled text content (total: {len(self.assembled_content)} chars)")
+                else:
+                    print(f"ℹ️ _parse_sse_stream: No 'chat' in events, not saving assembled content")
             
             # If we still have no events, just return raw chunks
             if not events:
@@ -526,7 +587,7 @@ class NetworkMonitor:
             
             return events
         except Exception as e:
-            print(f"Error parsing SSE stream: {e}")
+            print(f"❌ _parse_sse_stream: Error parsing SSE stream: {e}")
             if self.debug:
                 traceback.print_exc()
             return []
@@ -634,7 +695,13 @@ class NetworkMonitor:
             
             # Extract a meaningful name from the URL
             url_parts = url.split('/')
+            print(f"url_parts: {url_parts}")
             file_name = None
+            
+            # Skip if URL contains community or projects
+            if 'community' in url_parts or 'projects' in url_parts:
+                print(f"ℹ️ _capture_content_response: URL contains community/projects, skipping: {url}")
+                return
             
             # Look for meaningful segments in the URL
             for part in url_parts:
@@ -645,39 +712,270 @@ class NetworkMonitor:
             if not file_name:
                 # Fallback to the last part of the URL
                 file_name = url_parts[-1].split('?')[0]
+                print(f"ℹ️ last part of the url: {file_name}")
             
             # Clean up the filename
             file_name = file_name.replace('/', '_').replace('?', '_').replace('=', '_')
             
-            # Save the response
-            filename = f"{self.capture_dir}/{file_name}_{timestamp}.txt"
-            
-            with open(filename, "w") as f:
-                f.write(body_text)
-            
-            self.saved_files.append(filename)
-            
-            # Also save as JSON if it looks like JSON
-            if body_text.strip().startswith('{') or body_text.strip().startswith('['):
-                try:
-                    json_data = json.loads(body_text)
-                    json_filename = f"{self.capture_dir}/{file_name}_{timestamp}.json"
-                    with open(json_filename, "w") as f:
-                        json.dump(json_data, f, indent=2)
-                    self.saved_files.append(json_filename)
-                except:
-                    pass
+            # Only save if the URL contains "chat"
+            if "chat" in url.lower():
+                filename = f"{self.capture_dir}/{file_name}_{timestamp}.txt"
+
+                # Check for pattern: name-with-dashes-chatid_timestamp
+                pattern = f'-{self.chat_id}_'
+                if not re.search(pattern, filename):
+                    print(f"filename does not match expected pattern: {filename} - not saving response")
+                    return
+                
+                with open(filename, "w") as f:
+                    f.write(body_text)
+                
+                print(f"💾 _capture_content_response: Saved response to: {filename}")
+                self.saved_files.append(filename)
+                
+                # Also save a cleaned version with only the code
+                clean_text = self._clean_response_text(body_text)
+                if clean_text:
+                    clean_filename = f"{self.capture_dir}/{file_name}_clean_{timestamp}.txt"
+                    with open(clean_filename, "w") as f:
+                        f.write(clean_text)
                     
-            # Save to a consistent filename for the latest response
-            # This will be overwritten with each new response
-            consistent_filename = f"{self.capture_dir}/latest_response.txt"
-            with open(consistent_filename, "w") as f:
-                f.write(body_text)
-            if consistent_filename not in self.saved_files:
-                self.saved_files.append(consistent_filename)
+                    print(f"💾 _capture_content_response: Saved cleaned response to: {clean_filename}")
+                    self.saved_files.append(clean_filename)
+            else:
+                print(f"ℹ️ _capture_content_response: URL doesn't contain 'chat', not saving files")
                 
         except Exception as e:
-            pass
+            print(f"❌ _capture_content_response: Error capturing content: {e}")
+            
+    def _clean_response_text(self, text):
+        """Clean the response text to extract only the code sections"""
+        try:
+            # First use the existing pattern to find V0_FILE sections
+            v0_file_pattern = r'(\w+:T\w+,\[V0_FILE\][^"]+".+?")'
+            v0_sections = list(re.finditer(v0_file_pattern, text))
+            
+            # If we found sections with the standard pattern, process them
+            if v0_sections:
+                print(f"📋 _clean_response_text: Found {len(v0_sections)} V0_FILE sections with primary pattern")
+            else:
+                # As a fallback for plain text files, look for any [V0_FILE] markers
+                # This helps with secondary files that might not have the prefix
+                v0_file_lines = []
+                lines = text.split('\n')
+                current_start = 0
+                
+                for i, line in enumerate(lines):
+                    if '[V0_FILE]' in line and 'file="' in line:
+                        v0_file_lines.append((current_start, line))
+                        current_start = i
+                
+                if v0_file_lines:
+                    print(f"📋 _clean_response_text: Found {len(v0_file_lines)} V0_FILE sections with fallback pattern")
+                    # Create match-like objects for processing
+                    v0_sections = []
+                    for i, (line_idx, line_text) in enumerate(v0_file_lines):
+                        section_text = line_text
+                        v0_sections.append(type('MockMatch', (), {'start': lambda: line_idx, 'group': lambda x=0: section_text}))
+                else:
+                    print("⚠️ _clean_response_text: No V0_FILE sections found in text")
+                    return None
+            
+            # Continue with existing code - process each section
+            clean_sections = []
+            mdx_sections = []
+            unique_files = {}
+            
+            # Process primary matched sections first
+            for i, section_match in enumerate(v0_sections):
+                section_start = section_match.start()
+                section_marker = section_match.group(0)
+                
+                # Extract the file path for deduplication (keep existing code)
+                file_path_match = re.search(r'\[V0_FILE\][^"]+file="([^"]+)"', section_marker)
+                if not file_path_match:
+                    continue
+                file_path = file_path_match.group(1)
+                
+                # Skip if this file has already been processed (keep existing code)
+                if file_path in unique_files:
+                    print(f"🔄 _clean_response_text: Skipping duplicate file: {file_path}")
+                    continue
+                
+                # Mark this file as processed (keep existing code)
+                unique_files[file_path] = True
+                
+                # Determine section text (keep existing code with minor enhancement)
+                if i < len(v0_sections) - 1:
+                    next_section_start = v0_sections[i+1].start()
+                    section_text = text[section_start:next_section_start]
+                else:
+                    # For the last section, go to the end of the text
+                    section_text = text[section_start:]
+                
+                # Split into lines for processing (keep existing code)
+                lines = section_text.split('\n')
+                
+                # The first line contains the V0_FILE marker (keep existing code)
+                clean_lines = [lines[0]]
+                
+                # Extract language type from marker for MDX format (keep existing code)
+                language_match = re.search(r'\[V0_FILE\](\w+):file="', section_marker)
+                language_type = language_match.group(1) if language_match else "text"
+                
+                # If we're using the fallback pattern, check for other language indicators
+                if not language_match and ':file="' in section_marker:
+                    lang_alt_match = re.search(r'(\w+):file="', section_marker)
+                    if lang_alt_match:
+                        language_type = lang_alt_match.group(1)
+                
+                # Process code lines - keep all existing code
+                code_lines = []
+                for j in range(1, len(lines)):
+                    line = lines[j]
+                    
+                    # Stop at next file marker
+                    if j > 0 and '[V0_FILE]' in line and 'file="' in line:
+                        break
+                    
+                    # Check if this line looks like metadata (e.g., "19:[["b_RRDRw9zzXnD",false]]")
+                    if re.match(r'^\d+:\[\["[^"]+",', line):
+                        continue
+                        
+                    # Check for cursor position marker
+                    if '<CURRENT_CURSOR_POSITION>' in line:
+                        continue
+                        
+                    # Check for other non-code patterns
+                    if re.match(r'^\w+:\[\[', line):
+                        continue
+                    
+                    code_lines.append(line)
+                
+                # Keep existing filtering logic
+                filtered_code_lines = []
+                is_svg_or_json = file_path.endswith('.svg') or file_path.endswith('.json') or '.tsx' in file_path or '.jsx' in file_path
+                nesting_level = 0
+                in_special_content = False
+                
+                for line in code_lines:
+                    # Count opening and closing brackets/tags to track nesting
+                    if is_svg_or_json:
+                        # For SVG/JSX files, we need to track tag and brace nesting
+                        opens = line.count('<') + line.count('{')
+                        closes = line.count('>') + line.count('}')
+                        
+                        # Detect if we're in a special content block (like SVG or JSON)
+                        if '<svg' in line or '={[' in line or '= {' in line:
+                            in_special_content = True
+                        
+                        # Once we're in special content, be more careful about what we exclude
+                        if in_special_content:
+                            filtered_code_lines.append(line)
+                            continue
+                        
+                        nesting_level += opens - closes
+                    
+                    # Skip lines that are clearly non-code metadata
+                    if re.match(r'^f:\[\["', line) or re.match(r'^[\d]+:\[\[', line):
+                        # But only if we're not in a nested structure
+                        if nesting_level <= 0 and not in_special_content:
+                            break
+                    
+                    # Add the line to our filtered list if it's not empty or is part of a nested structure
+                    if line.strip() or nesting_level > 0 or in_special_content:
+                        filtered_code_lines.append(line)
+                
+                # Add all the filtered code lines
+                clean_lines.extend(filtered_code_lines)
+                
+                # Create traditional clean text section
+                clean_sections.append('\n'.join(clean_lines))
+                
+                # Create Cursor-style formatted section
+                code_block = '\n'.join(filtered_code_lines)
+                mdx_section = f"```{language_type}:{file_path}\n{code_block}\n```"
+                mdx_sections.append(mdx_section)
+            
+            # Now also process any additional files in plain text format
+            # Look for lines starting with [V0_FILE] that weren't caught by the regex
+            lines = text.split('\n')
+            for i, line in enumerate(lines):
+                if line.startswith('[V0_FILE]') and 'file="' in line and i+1 < len(lines):
+                    # Extract file path
+                    file_path_match = re.search(r'file="([^"]+)"', line)
+                    if not file_path_match:
+                        continue
+                        
+                    file_path = file_path_match.group(1)
+                    
+                    # Skip if already processed
+                    if file_path in unique_files:
+                        continue
+                        
+                    unique_files[file_path] = True
+                    
+                    # Extract language
+                    language_match = re.search(r'\[V0_FILE\](\w+):file="', line)
+                    language_type = language_match.group(1) if language_match else "text"
+                    
+                    # Find the end of this file's content (next file marker or end of text)
+                    end_line = len(lines)
+                    for j in range(i+1, len(lines)):
+                        if '[V0_FILE]' in lines[j] and 'file="' in lines[j]:
+                            end_line = j
+                            break
+                    
+                    # Extract and filter code
+                    code_lines = lines[i+1:end_line]
+                    filtered_code_lines = [line for line in code_lines if line.strip()]
+                    
+                    # Create Cursor-style formatted section
+                    code_block = '\n'.join(filtered_code_lines)
+                    mdx_section = f"```{language_type}:{file_path}\n{code_block}\n```"
+                    mdx_sections.append(mdx_section)
+            
+            # Combine all clean sections (original format)
+            clean_text = '\n\n'.join(clean_sections)
+            
+            # Combine all MDX sections (new format)
+            mdx_text = '\n\n'.join(mdx_sections)
+            
+            # Save MDX formatted output
+            timestamp = int(time.time())
+            mdx_filename = f"{self.capture_dir}/cursor_formatted_{timestamp}.md"
+            # with open(mdx_filename, "w") as f:
+            #     f.write(mdx_text)
+            
+            print(f"💾 _clean_response_text: Saved Cursor-style formatted output to: {mdx_filename} with {len(mdx_sections)} files")
+            # self.saved_files.append(mdx_filename)
+            
+            # Keep original file extraction functionality
+            for i, section_text in enumerate(clean_sections):
+                file_path_match = re.search(r'\[V0_FILE\][^"]+file="([^"]+)"', section_text)
+                if file_path_match:
+                    file_path = file_path_match.group(1)
+                    
+                    # Extract only the code part (everything after the first line)
+                    code_lines = section_text.split('\n')[1:]
+                    
+                    # Create a clean filename for this specific section
+                    timestamp = int(time.time())
+                    clean_filename = f"{self.capture_dir}/file_{file_path.replace('/', '_')}_{timestamp}.txt"
+                    
+                    # with open(clean_filename, "w") as f:
+                    #     f.write('\n'.join(code_lines))
+                    
+                    print(f"💾 _clean_response_text: Saved individual file to: {clean_filename}")
+                    # self.saved_files.append(clean_filename)
+            
+            return mdx_text
+            
+        except Exception as e:
+            print(f"❌ _clean_response_text: Error cleaning response text: {e}")
+            if self.debug:
+                traceback.print_exc()
+            return None
     
     def _handle_response_finished(self, event):
         """Handle response body finished loading events using CDP"""
@@ -704,9 +1002,10 @@ class NetworkMonitor:
             return
             
         # Create a task to get and save the response body
-        task = asyncio.create_task(self._get_and_save_response_body(request_id, url))
-        self.pending_tasks.append(task)
-    
+        # task = asyncio.create_task(self._get_and_save_response_body(request_id, url))
+        # self.pending_tasks.append(task)
+        return
+        
     async def _get_and_save_response_body(self, request_id, url):
         """Get response body and save it to file"""
         try:
@@ -728,74 +1027,78 @@ class NetworkMonitor:
             # Create a unique filename
             timestamp = int(time.time())
             url_part = url.split("/")[-1].split("?")[0][:30]
-            filename = f"{self.capture_dir}/{url_part}_{timestamp}"
             
-            # For SSE streams, try to parse them
-            if "text/event-stream" in content_type:
-                events = self._parse_sse_stream(body_bytes)
-                if events:
-                    json_filename = f"{filename}_sse.jsonl"
-                    with open(json_filename, "w") as f:
-                        for event in events:
-                            f.write(json.dumps(event) + "\n")
-                    print(f"📝 Saved parsed SSE events to {json_filename}")
-                    self.saved_files.append(json_filename)
-                    
-                    # Also save the raw data
-                    with open(f"{filename}_sse.raw", "wb") as f:
-                        f.write(body_bytes)
-                    print(f"📝 Saved raw SSE data to {filename}_sse.raw")
-                    self.saved_files.append(f"{filename}_sse.raw")
-                    
-                    # Add to our vercel responses collection
-                    self.vercel_ai_responses.extend(events)
-                    return
-            
-            # Determine file type and save
-            if "json" in content_type.lower():
-                # Try to save as JSON
-                try:
-                    if isinstance(body_bytes, bytes):
-                        json_text = body_bytes.decode('utf-8')
-                    else:
-                        json_text = body
+            # Only save if url_part is "chat"
+            if url_part.lower() == "chat":
+                filename = f"{self.capture_dir}/{url_part}_{timestamp}"
+                
+                # For SSE streams, try to parse them
+                if "text/event-stream" in content_type:
+                    events = self._parse_sse_stream(body_bytes)
+                    if events:
+                        json_filename = f"{filename}_sse.jsonl"
+                        with open(json_filename, "w") as f:
+                            for event in events:
+                                f.write(json.dumps(event) + "\n")
+                        self.saved_files.append(json_filename)
                         
-                    json_data = json.loads(json_text)
-                    with open(f"{filename}.json", "w") as f:
-                        json.dump(json_data, f, indent=2)
-                    print(f"📝 Saved JSON response to {filename}.json")
-                    self.saved_files.append(f"{filename}.json")
-                except Exception as e:
-                    # Save as raw if JSON parsing fails
-                    with open(f"{filename}.txt", "wb") as f:
-                        f.write(body_bytes)
-                    print(f"📝 Saved text response to {filename}.txt")
-                    self.saved_files.append(f"{filename}.txt")
-            else:
-                # Save as binary or text based on content
-                if "_stream" in url or "binary" in content_type.lower():
-                    with open(f"{filename}.bin", "wb") as f:
-                        f.write(body_bytes)
-                    print(f"📝 Saved binary response to {filename}.bin")
-                    self.saved_files.append(f"{filename}.bin")
-                    
-                    # Also try to decode as text
+                        # Also save the raw data
+                        raw_filename = f"{filename}_sse.raw"
+                        with open(raw_filename, "wb") as f:
+                            f.write(body_bytes)
+                        self.saved_files.append(raw_filename)
+                        
+                        # Add to our vercel responses collection
+                        self.vercel_ai_responses.extend(events)
+                        return
+                
+                # Determine file type and save
+                if "json" in content_type.lower():
+                    # Try to save as JSON
                     try:
-                        decoded = body_bytes.decode('utf-8', errors='ignore')
-                        with open(f"{filename}_decoded.txt", "w") as f:
-                            f.write(decoded)
-                        print(f"📝 Saved decoded binary to {filename}_decoded.txt")
-                        self.saved_files.append(f"{filename}_decoded.txt")
-                    except:
-                        pass
+                        if isinstance(body_bytes, bytes):
+                            json_text = body_bytes.decode('utf-8')
+                        else:
+                            json_text = body
+                            
+                        json_data = json.loads(json_text)
+                        json_filename = f"{filename}.json"
+                        with open(json_filename, "w") as f:
+                            json.dump(json_data, f, indent=2)
+                        self.saved_files.append(json_filename)
+                    except Exception as e:
+                        # Save as raw if JSON parsing fails
+                        text_filename = f"{filename}.txt"
+                        with open(text_filename, "wb") as f:
+                            f.write(body_bytes)
+                        self.saved_files.append(text_filename)
                 else:
-                    # Save as text
-                    with open(f"{filename}.txt", "wb") as f:
-                        f.write(body_bytes)
-                    print(f"📝 Saved text response to {filename}.txt")
-                    self.saved_files.append(f"{filename}.txt")
+                    # Save as binary or text based on content
+                    if "_stream" in url or "binary" in content_type.lower():
+                        bin_filename = f"{filename}.bin"
+                        with open(bin_filename, "wb") as f:
+                            f.write(body_bytes)
+                        self.saved_files.append(bin_filename)
+                        
+                        # Also try to decode as text
+                        try:
+                            decoded = body_bytes.decode('utf-8', errors='ignore')
+                            decoded_filename = f"{filename}_decoded.txt"
+                            with open(decoded_filename, "w") as f:
+                                f.write(decoded)
+                            self.saved_files.append(decoded_filename)
+                        except:
+                            print(f"ℹ️ _get_and_save_response_body: Could not decode binary as text")
+                    else:
+                        # Save as text
+                        text_filename = f"{filename}.txt"
+                        with open(text_filename, "wb") as f:
+                            f.write(body_bytes)
+                        self.saved_files.append(text_filename)
+            else:
+                print(f"ℹ️ _get_and_save_response_body: URL part '{url_part}' is not 'chat', not saving files")
         except Exception as e:
-            print(f"Error saving response body for {url}: {e}")
+            print(f"❌ _get_and_save_response_body: Error saving response body for {url}: {e}")
             if self.debug:
                 traceback.print_exc()
     
@@ -805,31 +1108,31 @@ class NetworkMonitor:
             return
             
         try:
-            timestamp = int(time.time())
-            filename = f"{self.capture_dir}/send_request_{timestamp}.json"
-            
-            # Try to parse as JSON
-            try:
-                json_data = json.loads(post_data)
-                with open(filename, "w") as f:
-                    json.dump(json_data, f, indent=2)
-                if self.debug:
-                    print(f"Saved request payload to {filename}")
-                self.saved_files.append(filename)
+            print(f"🔍 _save_request_payload: Processing request payload from URL: {url}")
+            # Only save if the URL contains "chat"
+            if "chat" in url.lower():
+                timestamp = int(time.time())
+                filename = f"{self.capture_dir}/send_request_{timestamp}.json"
                 
-                # Print prompt if found and in debug mode
-                if "prompt" in json_data and self.debug:
-                    print(f"DETECTED PROMPT: {json_data['prompt'][:100]}...")
-            except:
-                # Save as plain text
-                with open(filename, "w") as f:
-                    f.write(post_data)
-                if self.debug:
-                    print(f"Saved request payload to {filename}")
-                self.saved_files.append(filename)
+                # Try to parse as JSON
+                try:
+                    json_data = json.loads(post_data)
+                    with open(filename, "w") as f:
+                        json.dump(json_data, f, indent=2)
+                    self.saved_files.append(filename)
+                    
+                    # Print prompt if found and in debug mode
+                    if "prompt" in json_data and self.debug:
+                        print(f"DETECTED PROMPT: {json_data['prompt'][:100]}...")
+                except:
+                    # Save as plain text
+                    with open(filename, "w") as f:
+                        f.write(post_data)
+                    self.saved_files.append(filename)
+            else:
+                print(f"ℹ️ _save_request_payload: URL doesn't contain 'chat', not saving files")
         except Exception as e:
-            if self.debug:
-                print(f"Error saving request payload: {e}")
+            print(f"❌ _save_request_payload: Error saving request payload: {e}")
     
     def _log_websocket(self, websocket):
         """Log websocket connection"""
@@ -855,35 +1158,35 @@ class NetworkMonitor:
         if not self.prompt_submitted:
             return
         
-        timestamp = int(time.time())
-        url_part = websocket.url.split("/")[-1].split("?")[0][:30]
-        filename = f"{self.capture_dir}/ws_{url_part}_{timestamp}.txt"
-        
-        if self.debug:
-            print(f"WebSocket message on {websocket.url} ({len(message)} bytes)")
-        
-        # Save the message content
-        try:
-            with open(filename, "w") as f:
-                f.write(message)
-            if self.debug:
-                print(f"Saved WebSocket message to {filename}")
-            self.saved_files.append(filename)
+        # Only save if the URL contains "chat"
+        if "chat" in websocket.url.lower():
+            print(f"🔍 _log_websocket_message: Processing WebSocket message from URL: {websocket.url}")
+            timestamp = int(time.time())
+            url_part = websocket.url.split("/")[-1].split("?")[0][:30]
+            filename = f"{self.capture_dir}/ws_{url_part}_{timestamp}.txt"
             
-            # Try to parse as JSON
-            try:
-                json_data = json.loads(message)
-                json_filename = f"{self.capture_dir}/ws_{url_part}_{timestamp}.json"
-                with open(json_filename, "w") as f:
-                    json.dump(json_data, f, indent=2)
-                if self.debug:
-                    print(f"Saved parsed WebSocket JSON to {json_filename}")
-                self.saved_files.append(json_filename)
-            except:
-                pass
-        except Exception as e:
             if self.debug:
-                print(f"Error saving WebSocket message: {e}")
+                print(f"WebSocket message on {websocket.url} ({len(message)} bytes)")
+            
+            # Save the message content
+            try:
+                with open(filename, "w") as f:
+                    f.write(message)
+                self.saved_files.append(filename)
+                
+                # Try to parse as JSON
+                try:
+                    json_data = json.loads(message)
+                    json_filename = f"{self.capture_dir}/ws_{url_part}_{timestamp}.json"
+                    with open(json_filename, "w") as f:
+                        json.dump(json_data, f, indent=2)
+                    self.saved_files.append(json_filename)
+                except:
+                    print(f"ℹ️ _log_websocket_message: Message is not valid JSON, only saved as text")
+            except Exception as e:
+                print(f"❌ _log_websocket_message: Error saving WebSocket message: {e}")
+        else:
+            print(f"ℹ️ _log_websocket_message: WebSocket URL doesn't contain 'chat', not saving message")
     
     async def submit_prompt(self, prompt: str, wait_time: float = 2.0):
         """Type and submit a prompt to v0.dev"""
@@ -899,6 +1202,10 @@ class NetworkMonitor:
         
         # Allow some time for the UI to register the text
         await asyncio.sleep(wait_time)
+        
+        # Reset the chat_id before submitting
+        self.chat_id = None
+        print("Resetting chat_id before submission")
         
         # Try multiple methods to submit the prompt
         print("Submitting prompt...")
@@ -953,108 +1260,19 @@ class NetworkMonitor:
         self.prompt_submitted = True
         
         print("Monitoring for responses...")
+        
+        # Wait a short time to see if we get a URL change
+        try:
+            print("Waiting for URL change to detect chat_id...")
+            # We don't need to block here - the navigation handler will catch the URL change
+        except Exception as e:
+            print(f"Error waiting for URL change: {e}")
     
     async def await_pending_tasks(self):
         """Wait for all pending tasks to complete"""
         if self.pending_tasks:
             await asyncio.gather(*self.pending_tasks, return_exceptions=True)
             self.pending_tasks = []
-    
-    def print_network_summary(self):
-        """Print summary of network activity after prompt submission"""
-        if not self.prompt_submitted or not self.network_log:
-            print("No network activity logged yet.")
-            return
-            
-        # Filter to just post-submission events
-        submission_time = 0
-        for event in self.network_log:
-            if event.get("type") == "request" and self.prompt_submitted:
-                submission_time = event.get("timestamp", 0)
-                break
-                
-        if submission_time == 0:
-            print("Could not determine prompt submission time.")
-            return
-            
-        post_submission = [e for e in self.network_log if e.get("timestamp", 0) >= submission_time]
-        
-        print("\n=== NETWORK SUMMARY ===")
-        print(f"Total network events after prompt submission: {len(post_submission)}")
-        
-        # Group by type
-        requests = [e for e in post_submission if e.get("type") == "request"]
-        responses = [e for e in post_submission if e.get("type") == "response"]
-        websockets = [e for e in post_submission if e.get("type") == "websocket"]
-        
-        print(f"Requests: {len(requests)}")
-        print(f"Responses: {len(responses)}")
-        print(f"WebSockets: {len(websockets)}")
-        
-        # Count files saved
-        print(f"Files saved to '{self.capture_dir}' directory: {len(self.saved_files)}")
-        
-        # Check if we have Vercel AI SDK responses
-        if self.vercel_ai_responses:
-            print(f"Vercel AI SDK responses captured: {len(self.vercel_ai_responses)}")
-        
-        # List important endpoints
-        print("\n=== IMPORTANT ENDPOINTS ===")
-        stream_endpoints = [e for e in post_submission if "_stream" in e.get("url", "")]
-        api_endpoints = [e for e in post_submission if "api" in e.get("url", "") and "v0.dev" in e.get("url", "")]
-        
-        # Check for the send endpoint specifically
-        send_endpoints = [e for e in post_submission if "v0.dev/chat/api/send" in e.get("url", "")]
-        if send_endpoints:
-            print("\nPrompt send endpoint:")
-            seen_urls = set()
-            for e in send_endpoints:
-                if e.get("type") == "request":
-                    url = e.get("url", "")
-                    method = e.get("method", "")
-                    if f"{method}:{url}" not in seen_urls:
-                        print(f"  - [{method}] {url}")
-                        seen_urls.add(f"{method}:{url}")
-        
-        if stream_endpoints:
-            print("\nStreaming endpoints:")
-            seen_urls = set()
-            for e in stream_endpoints:
-                url = e.get("url", "")
-                if url not in seen_urls:
-                    print(f"  - {url}")
-                    seen_urls.add(url)
-        
-        if api_endpoints:
-            print("\nAPI endpoints:")
-            seen_urls = set()
-            for e in api_endpoints:
-                url = e.get("url", "")
-                if url not in seen_urls and "send" not in url:  # Don't repeat the send endpoint
-                    print(f"  - {url}")
-                    seen_urls.add(url)
-                    
-        # Show extracted AI responses
-        if self.vercel_ai_responses:
-            print("\n=== VERCEL AI SDK RESPONSES ===")
-            for i, resp in enumerate(self.vercel_ai_responses[:5], 1):  # Show first 5 responses
-                if "text" in resp:
-                    print(f"  {i}. {resp['text'][:100]}..." if len(resp['text']) > 100 else resp['text'])
-                elif "raw" in resp:
-                    print(f"  {i}. Raw: {resp['raw'][:100]}..." if len(resp['raw']) > 100 else resp['raw'])
-                else:
-                    print(f"  {i}. {json.dumps(resp)[:100]}..." if len(json.dumps(resp)) > 100 else json.dumps(resp))
-            
-            if len(self.vercel_ai_responses) > 5:
-                print(f"  ... and {len(self.vercel_ai_responses) - 5} more responses")
-                    
-        if self.saved_files:
-            print("\n=== SAVED FILES ===")
-            for i, file in enumerate(self.saved_files[:10], 1):  # Show first 10 files
-                print(f"  {i}. {os.path.basename(file)}")
-            
-            if len(self.saved_files) > 10:
-                print(f"  ... and {len(self.saved_files) - 10} more files")
 
 async def monitor_v0_interactions(prompt):
     """Main function to monitor v0.dev interactions with a specific prompt"""
@@ -1063,7 +1281,11 @@ async def monitor_v0_interactions(prompt):
         headless=False,
         debug=False,
         disable_security=True,
-        extra_args=["--disable-web-security", "--enable-logging"]  # Allow cross-origin requests and enable more logging
+        extra_args=[
+            "--disable-web-security", 
+            "--enable-logging",
+            "--process-per-tab"  # Use separate processes for tabs to maintain monitoring
+        ]
     )
     
     # Initialize browser and monitor
@@ -1074,6 +1296,9 @@ async def monitor_v0_interactions(prompt):
         # Set up page and monitoring
         await monitor.setup()
         
+        # Make the monitoring more resilient to tab switching
+        print("✨ Tab monitoring active - you can now safely switch to other tabs")
+        
         # Submit the prompt and wait for responses
         await monitor.submit_prompt(prompt)
         
@@ -1083,6 +1308,16 @@ async def monitor_v0_interactions(prompt):
         try:
             while True:
                 await asyncio.sleep(1)
+                # Ensure the CDP session is still attached to our page
+                if monitor.client and monitor.page:
+                    try:
+                        # Ping the client to ensure it's still connected
+                        await monitor.client.send("Runtime.evaluate", {"expression": "1"})
+                    except Exception as e:
+                        print("⚠️ Lost connection to monitored tab, reconnecting...")
+                        # Reconnect the CDP session
+                        monitor.client = await monitor.page.context.new_cdp_session(monitor.page)
+                        await monitor._setup_network_interception()
         except KeyboardInterrupt:
             print("\nMonitoring stopped.")
         
@@ -1096,112 +1331,175 @@ async def monitor_v0_interactions(prompt):
         print(f"Error: {e}")
     finally:
         # Clean up resources
-        await browser.close()
+        # await browser.close()
+        pass
 
-def extract_v0_response(captured_file_path):
-    """
-    Extract and process a complete response from a v0.dev captured file.
-    This function takes a capture file path and returns the cleaned content.
+async def monitor_v0_interactions_and_return_content(prompt):
+    """Modified version of monitor_v0_interactions that returns the clean text instead of saving to file"""
+    # Configure browser
+    config = BrowserConfig(
+        headless=False,
+        debug=False,
+        disable_security=True,
+        extra_args=[
+            "--disable-web-security", 
+            "--enable-logging",
+            "--process-per-tab"  # Use separate processes for tabs to maintain monitoring
+        ]
+    )
     
-    Args:
-        captured_file_path: Path to the captured file (typically assembled_content or full_response)
+    # Initialize browser and monitor with custom class
+    browser = Browser(config)
+    monitor = ContentReturningMonitor(browser, debug=False)  # Use the modified monitor class
     
-    Returns:
-        str: The cleaned, complete response text
-    """
     try:
-        if not os.path.exists(captured_file_path):
-            print(f"Error: File {captured_file_path} does not exist")
-            return None
+        # Set up page and monitoring
+        await monitor.setup()
         
-        # Read the file content
-        with open(captured_file_path, 'r') as f:
-            content = f.read()
+        # Make the monitoring more resilient to tab switching
+        print("✨ Tab monitoring active - you can now safely switch to other tabs")
         
-        # If this is already a clean text file, return it
-        if captured_file_path.endswith('full_response.txt') or captured_file_path.endswith('assembled_content.txt'):
-            print(f"Extracted {len(content)} characters of text from {os.path.basename(captured_file_path)}")
-            return content
+        # Submit the prompt and wait for responses
+        await monitor.submit_prompt(prompt)
         
-        # If this is a JSONL file, parse each line and extract text content
-        if captured_file_path.endswith('.jsonl'):
-            assembled_text = ""
-            with open(captured_file_path, 'r') as f:
-                for line in f:
+        print("Monitoring network traffic. Press Ctrl+C to stop.")
+        
+        # Wait until we get content or timeout
+        max_wait_time = 300  # Maximum wait time in seconds
+        wait_start = time.time()
+        
+        try:
+            while True:
+                # Return clean_text once we have it
+                if monitor.clean_text_content:
+                    return monitor.clean_text_content
+                
+                # Check if we've waited too long
+                if time.time() - wait_start > max_wait_time:
+                    print("Reached maximum wait time, returning any content available")
+                    return monitor.clean_text_content or "No content captured within timeout period"
+                
+                await asyncio.sleep(1)
+                # Ensure the CDP session is still attached to our page
+                if monitor.client and monitor.page:
                     try:
-                        data = json.loads(line.strip())
-                        # Extract text from various formats
-                        if 'text' in data:
-                            assembled_text += data['text']
-                        elif 'event_type' in data and data['event_type'] == 'data' and 'text' in data:
-                            assembled_text += data['text']
-                        elif 'value' in data and isinstance(data['value'], list):
-                            for item in data['value']:
-                                if isinstance(item, dict) and 'text' in item:
-                                    assembled_text += item['text']
-                    except:
-                        continue
+                        # Ping the client to ensure it's still connected
+                        await monitor.client.send("Runtime.evaluate", {"expression": "1"})
+                    except Exception as e:
+                        print("⚠️ Lost connection to monitored tab, reconnecting...")
+                        # Reconnect the CDP session
+                        monitor.client = await monitor.page.context.new_cdp_session(monitor.page)
+                        await monitor._setup_network_interception()
+        except KeyboardInterrupt:
+            print("\nMonitoring stopped.")
+        
+        # Process pending tasks
+        await monitor.await_pending_tasks()
+        
+        # Return the captured content or a default message
+        return monitor.clean_text_content or "No content captured before stopping"
             
-            if assembled_text:
-                print(f"Extracted {len(assembled_text)} characters of text from {os.path.basename(captured_file_path)}")
-                return assembled_text
-        
-        # If this is a raw SSE stream, try to parse it
-        lines = content.split('\n')
-        assembled_text = ""
-        
-        for line in lines:
-            if line.startswith('data: '):
-                try:
-                    data_content = line[6:]
-                    json_data = json.loads(data_content)
-                    
-                    # Handle Vercel AI SDK format
-                    if isinstance(json_data, dict):
-                        if 'type' in json_data and json_data['type'] == 'data' and 'value' in json_data:
-                            for item in json_data['value']:
-                                if isinstance(item, dict) and 'text' in item:
-                                    assembled_text += item['text']
-                        elif 'text' in json_data:
-                            assembled_text += json_data['text']
-                except:
-                    pass
-        
-        if assembled_text:
-            print(f"Extracted {len(assembled_text)} characters of text from {os.path.basename(captured_file_path)}")
-            return assembled_text
-        
-        # If we couldn't extract any text, return the original content
-        print(f"Could not extract structured text. Returning raw content ({len(content)} characters)")
-        return content
-        
     except Exception as e:
-        print(f"Error extracting v0 response: {e}")
-        traceback.print_exc()
-        return None
+        print(f"Error: {e}")
+        return f"Error occurred: {e}"
+    finally:
+        # Clean up resources
+        # await browser.close()
+        pass
 
-if __name__ == "__main__":
-    """
-    Script entry point. You can also provide a file path to extract and print a response.
+class ContentReturningMonitor(NetworkMonitor):
+    """Modified NetworkMonitor that stores clean_text_content for retrieval"""
     
-    Usage:
-        python tools.py                      # Run the main monitoring function
-        python tools.py extract <filepath>   # Extract and print response from a captured file
-    """
-    if len(sys.argv) > 1 and sys.argv[1] == "extract":
-        if len(sys.argv) > 2:
-            filepath = sys.argv[2]
-            print(f"Extracting response from {filepath}...")
-            response = extract_v0_response(filepath)
-            if response:
-                print("\n" + "=" * 80)
-                print("EXTRACTED RESPONSE:")
-                print("=" * 80)
-                print(response)
-                print("=" * 80)
-        else:
-            print("Please provide a file path to extract from")
-            print("Usage: python tools.py extract <filepath>")
-    else:
-        # Run the main function
-        asyncio.run(monitor_v0_interactions()) 
+    def __init__(self, browser, debug=False):
+        """Initialize with a property to store clean text content"""
+        super().__init__(browser, debug)
+        self.clean_text_content = None
+    
+    async def _capture_and_return_content_response(self, request_id, url):
+        """Modified version that captures content and stores it for return instead of just saving to file"""
+        try:
+            # Get the response body using CDP
+            result = await self.client.send("Network.getResponseBody", {"requestId": request_id})
+            
+            body = result.get("body", "")
+            base64_encoded = result.get("base64Encoded", False)
+            
+            # Decode base64 if needed
+            if base64_encoded and body:
+                body_bytes = base64.b64decode(body)
+                body_text = body_bytes.decode('utf-8', errors='ignore')
+            else:
+                body_text = body
+            
+            # Create a unique filename based on the URL
+            timestamp = int(time.time())
+            
+            # Extract a meaningful name from the URL
+            url_parts = url.split('/')
+            print(f"url_parts: {url_parts}")
+            file_name = None
+            
+            # Skip if URL contains community or projects
+            if 'community' in url_parts or 'projects' in url_parts:
+                print(f"ℹ️ _capture_and_return_content_response: URL contains community/projects, skipping: {url}")
+                return
+            
+            # Look for meaningful segments in the URL
+            for part in url_parts:
+                if part.startswith("chat/") and len(part) > 5:
+                    file_name = part.split('?')[0]  # Remove query parameters
+                    break
+            
+            if not file_name:
+                # Fallback to the last part of the URL
+                file_name = url_parts[-1].split('?')[0]
+                print(f"ℹ️ last part of the url: {file_name}")
+            
+            # Clean up the filename
+            file_name = file_name.replace('/', '_').replace('?', '_').replace('=', '_')
+            
+            # Only process if the URL contains "chat"
+            if "chat" in url.lower():
+                # Generate the full filename just for pattern matching
+                filename = f"{self.capture_dir}/{file_name}_{timestamp}.txt"
+                
+                # Check for pattern in the full filename - exactly as in the original method
+                pattern = f'-{self.chat_id}_'
+                if not re.search(pattern, filename):
+                    # Skip pattern check - we don't want to return early here
+                    # This is the key fix - the original method was checking the pattern in the full filename
+                    # but we'll proceed anyway to catch all content
+                    print(f"⚠️ Pattern not found but processing anyway: {filename}")
+                
+                print(f"📝 _capture_and_return_content_response: Processing content from: {url}")
+                
+                # Get cleaned version with only the code
+                clean_text = self._clean_response_text(body_text)
+                if clean_text:
+                    # Store the clean text for later retrieval
+                    self.clean_text_content = clean_text
+                    print(f"✅ _capture_and_return_content_response: Clean text content stored for retrieval ({len(clean_text)} chars)")
+            else:
+                print(f"ℹ️ _capture_and_return_content_response: URL doesn't contain 'chat', not processing")
+                
+        except Exception as e:
+            print(f"❌ _capture_and_return_content_response: Error capturing content: {e}")
+    
+    # Override the handle_response_received method to capture content directly
+    def _handle_response_received(self, event):
+        """Handle response headers received events using CDP"""
+        # Call the original method first
+        super()._handle_response_received(event)
+        
+        # Add our custom processing for all responses
+        if self.prompt_submitted:
+            request_id = event.get("requestId")
+            response = event.get("response", {})
+            url = response.get("url")
+            
+            # Look for potential v0.dev content in all responses after prompt submission
+            if "v0.dev/chat/" in url:
+                print(f"🔍 Custom monitor checking URL: {url}")
+                # Create a task to capture this response
+                task = asyncio.create_task(self._capture_and_return_content_response(request_id, url))
+                self.pending_tasks.append(task)
