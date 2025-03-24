@@ -751,40 +751,61 @@ class NetworkMonitor:
     def _clean_response_text(self, text):
         """Clean the response text to extract only the code sections"""
         try:
-            # Look for all V0_FILE sections
+            # First use the existing pattern to find V0_FILE sections
             v0_file_pattern = r'(\w+:T\w+,\[V0_FILE\][^"]+".+?")'
             v0_sections = list(re.finditer(v0_file_pattern, text))
             
-            if not v0_sections:
-                print("⚠️ _clean_response_text: No V0_FILE sections found in text")
-                return None
+            # If we found sections with the standard pattern, process them
+            if v0_sections:
+                print(f"📋 _clean_response_text: Found {len(v0_sections)} V0_FILE sections with primary pattern")
+            else:
+                # As a fallback for plain text files, look for any [V0_FILE] markers
+                # This helps with secondary files that might not have the prefix
+                v0_file_lines = []
+                lines = text.split('\n')
+                current_start = 0
                 
-            print(f"📋 _clean_response_text: Found {len(v0_sections)} V0_FILE sections")
+                for i, line in enumerate(lines):
+                    if '[V0_FILE]' in line and 'file="' in line:
+                        v0_file_lines.append((current_start, line))
+                        current_start = i
+                
+                if v0_file_lines:
+                    print(f"📋 _clean_response_text: Found {len(v0_file_lines)} V0_FILE sections with fallback pattern")
+                    # Create match-like objects for processing
+                    v0_sections = []
+                    for i, (line_idx, line_text) in enumerate(v0_file_lines):
+                        section_text = line_text
+                        v0_sections.append(type('MockMatch', (), {'start': lambda: line_idx, 'group': lambda x=0: section_text}))
+                else:
+                    print("⚠️ _clean_response_text: No V0_FILE sections found in text")
+                    return None
             
-            # Process each section to extract clean code
+            # Continue with existing code - process each section
             clean_sections = []
-            mdx_sections = []  # New array to store MDX formatted sections
-            unique_files = {}  # Dictionary to track unique filenames
+            mdx_sections = []
+            unique_files = {}
             
+            # Process primary matched sections first
             for i, section_match in enumerate(v0_sections):
                 section_start = section_match.start()
                 section_marker = section_match.group(0)
                 
-                # Extract the file path for deduplication
+                # Extract the file path for deduplication (keep existing code)
                 file_path_match = re.search(r'\[V0_FILE\][^"]+file="([^"]+)"', section_marker)
                 if not file_path_match:
                     continue
                 file_path = file_path_match.group(1)
                 
-                # Skip if this file has already been processed
+                # Skip if this file has already been processed (keep existing code)
                 if file_path in unique_files:
                     print(f"🔄 _clean_response_text: Skipping duplicate file: {file_path}")
                     continue
                 
-                # Mark this file as processed
+                # Mark this file as processed (keep existing code)
                 unique_files[file_path] = True
                 
-                # Determine where this section ends
+                # Determine section text (keep existing code with minor enhancement)
                 if i < len(v0_sections) - 1:
                     next_section_start = v0_sections[i+1].start()
                     section_text = text[section_start:next_section_start]
@@ -792,20 +813,30 @@ class NetworkMonitor:
                     # For the last section, go to the end of the text
                     section_text = text[section_start:]
                 
-                # Split into lines for processing
+                # Split into lines for processing (keep existing code)
                 lines = section_text.split('\n')
                 
-                # The first line contains the V0_FILE marker
+                # The first line contains the V0_FILE marker (keep existing code)
                 clean_lines = [lines[0]]
                 
-                # Extract language type from marker for MDX format
+                # Extract language type from marker for MDX format (keep existing code)
                 language_match = re.search(r'\[V0_FILE\](\w+):file="', section_marker)
                 language_type = language_match.group(1) if language_match else "text"
                 
-                # Start actual code from the line after the marker
+                # If we're using the fallback pattern, check for other language indicators
+                if not language_match and ':file="' in section_marker:
+                    lang_alt_match = re.search(r'(\w+):file="', section_marker)
+                    if lang_alt_match:
+                        language_type = lang_alt_match.group(1)
+                
+                # Process code lines - keep all existing code
                 code_lines = []
                 for j in range(1, len(lines)):
                     line = lines[j]
+                    
+                    # Stop at next file marker
+                    if j > 0 and '[V0_FILE]' in line and 'file="' in line:
+                        break
                     
                     # Check if this line looks like metadata (e.g., "19:[["b_RRDRw9zzXnD",false]]")
                     if re.match(r'^\d+:\[\["[^"]+",', line):
@@ -821,16 +852,9 @@ class NetworkMonitor:
                     
                     code_lines.append(line)
                 
-                # MODIFIED: Instead of trying to find the "last meaningful line",
-                # we'll use a different approach to handle trailing content better
-                
-                # First, keep all non-empty lines by default
+                # Keep existing filtering logic
                 filtered_code_lines = []
-                
-                # Check if we're dealing with a file that might have SVG or JSON content
                 is_svg_or_json = file_path.endswith('.svg') or file_path.endswith('.json') or '.tsx' in file_path or '.jsx' in file_path
-                
-                # Track nesting level for brackets to better handle complex structures
                 nesting_level = 0
                 in_special_content = False
                 
@@ -868,10 +892,48 @@ class NetworkMonitor:
                 # Create traditional clean text section
                 clean_sections.append('\n'.join(clean_lines))
                 
-                # Create Cursor-style formatted section - THIS IS THE KEY CHANGE
+                # Create Cursor-style formatted section
                 code_block = '\n'.join(filtered_code_lines)
                 mdx_section = f"```{language_type}:{file_path}\n{code_block}\n```"
                 mdx_sections.append(mdx_section)
+            
+            # Now also process any additional files in plain text format
+            # Look for lines starting with [V0_FILE] that weren't caught by the regex
+            lines = text.split('\n')
+            for i, line in enumerate(lines):
+                if line.startswith('[V0_FILE]') and 'file="' in line and i+1 < len(lines):
+                    # Extract file path
+                    file_path_match = re.search(r'file="([^"]+)"', line)
+                    if not file_path_match:
+                        continue
+                        
+                    file_path = file_path_match.group(1)
+                    
+                    # Skip if already processed
+                    if file_path in unique_files:
+                        continue
+                        
+                    unique_files[file_path] = True
+                    
+                    # Extract language
+                    language_match = re.search(r'\[V0_FILE\](\w+):file="', line)
+                    language_type = language_match.group(1) if language_match else "text"
+                    
+                    # Find the end of this file's content (next file marker or end of text)
+                    end_line = len(lines)
+                    for j in range(i+1, len(lines)):
+                        if '[V0_FILE]' in lines[j] and 'file="' in lines[j]:
+                            end_line = j
+                            break
+                    
+                    # Extract and filter code
+                    code_lines = lines[i+1:end_line]
+                    filtered_code_lines = [line for line in code_lines if line.strip()]
+                    
+                    # Create Cursor-style formatted section
+                    code_block = '\n'.join(filtered_code_lines)
+                    mdx_section = f"```{language_type}:{file_path}\n{code_block}\n```"
+                    mdx_sections.append(mdx_section)
             
             # Combine all clean sections (original format)
             clean_text = '\n\n'.join(clean_sections)
@@ -879,23 +941,17 @@ class NetworkMonitor:
             # Combine all MDX sections (new format)
             mdx_text = '\n\n'.join(mdx_sections)
             
-            # Verify that we have code sections
-            if "[V0_FILE]" not in clean_text:
-                print("⚠️ _clean_response_text: Extracted text doesn't contain V0_FILE markers, using original text")
-                return None
-                
             # Save MDX formatted output
             timestamp = int(time.time())
             mdx_filename = f"{self.capture_dir}/cursor_formatted_{timestamp}.md"
-            with open(mdx_filename, "w") as f:
-                f.write(mdx_text)
+            # with open(mdx_filename, "w") as f:
+            #     f.write(mdx_text)
             
-            print(f"💾 _clean_response_text: Saved Cursor-style formatted output to: {mdx_filename}")
-            self.saved_files.append(mdx_filename)
+            print(f"💾 _clean_response_text: Saved Cursor-style formatted output to: {mdx_filename} with {len(mdx_sections)} files")
+            # self.saved_files.append(mdx_filename)
             
-            # Also create individual files for each code section (original functionality)
+            # Keep original file extraction functionality
             for i, section_text in enumerate(clean_sections):
-                # Extract the file path from the V0_FILE marker
                 file_path_match = re.search(r'\[V0_FILE\][^"]+file="([^"]+)"', section_text)
                 if file_path_match:
                     file_path = file_path_match.group(1)
@@ -907,13 +963,13 @@ class NetworkMonitor:
                     timestamp = int(time.time())
                     clean_filename = f"{self.capture_dir}/file_{file_path.replace('/', '_')}_{timestamp}.txt"
                     
-                    with open(clean_filename, "w") as f:
-                        f.write('\n'.join(code_lines))
+                    # with open(clean_filename, "w") as f:
+                    #     f.write('\n'.join(code_lines))
                     
                     print(f"💾 _clean_response_text: Saved individual file to: {clean_filename}")
-                    self.saved_files.append(clean_filename)
+                    # self.saved_files.append(clean_filename)
             
-            return clean_text
+            return mdx_text
             
         except Exception as e:
             print(f"❌ _clean_response_text: Error cleaning response text: {e}")
